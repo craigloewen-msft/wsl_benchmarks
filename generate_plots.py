@@ -127,8 +127,8 @@ def extract_file_operation_data(data, operation_type, metric_key):
 
 def create_box_plot(all_data, title, ylabel, xlabel, output_filename, format_x_as_filesize=False, show_median_values=True):
     """
-    Create a box and whisker plot from the data.
-    
+    Create a violin plot from the data.
+
     Args:
         all_data: Dictionary mapping test_name -> {file_size/num_files: [values]}
         title: Plot title
@@ -139,61 +139,74 @@ def create_box_plot(all_data, title, ylabel, xlabel, output_filename, format_x_a
         show_median_values: If True, display median values on the plot
     """
     fig, ax = plt.subplots(figsize=(12, 7))
-    
+
     # Get all unique x-positions (file_size or num_files) across all tests
     all_x_positions = set()
     for test_data in all_data.values():
         all_x_positions.update(test_data.keys())
     x_positions = sorted(all_x_positions)
-    
+
     # Prepare data for plotting
     num_tests = len(all_data)
     colors = plt.cm.Set3(np.linspace(0, 1, num_tests))
-    
-    # Calculate positions for grouped box plots
-    width = 0.8 / num_tests  # Width of each box
+
+    # Calculate positions for grouped violin plots
+    width = 0.8 / num_tests  # Width of each violin
     offset_start = -(num_tests - 1) * width / 2
-    
+
     # Sort test names alphabetically for consistent legend ordering
+    legend_handles = []
     for idx, (test_name, test_data) in enumerate(sorted(all_data.items())):
         positions = []
         data_to_plot = []
-        
+
         for x_pos in x_positions:
             if x_pos in test_data:
                 # Offset position for this test
                 positions.append(x_positions.index(x_pos) + offset_start + idx * width)
                 data_to_plot.append(test_data[x_pos])
-        
+
         if data_to_plot:
-            bp = ax.boxplot(data_to_plot, positions=positions, widths=width * 0.8,
-                           patch_artist=True, label=test_name,
-                           boxprops=dict(facecolor=colors[idx], alpha=0.7),
-                           medianprops=dict(color='red', linewidth=2),
-                           whiskerprops=dict(linewidth=1.5),
-                           capprops=dict(linewidth=1.5))
-            
+            # Create violin plot
+            parts = ax.violinplot(data_to_plot, positions=positions, widths=width * 0.8,
+                                  showmeans=True, showmedians=True)
+
+            # Hide the violin bodies
+            for pc in parts['bodies']:
+                pc.set_alpha(0)
+
+            # Color all statistical lines to match the legend color
+            for partname in ('cbars', 'cmins', 'cmaxes', 'cmeans', 'cmedians'):
+                if partname in parts:
+                    parts[partname].set_edgecolor(colors[idx])
+                    parts[partname].set_linewidth(2)
+
+            # Add to legend (create a patch for the legend)
+            from matplotlib.patches import Patch
+            legend_handles.append(Patch(facecolor=colors[idx], alpha=0.7, edgecolor='black', label=test_name))
+
             # Add median values as text if requested
             if show_median_values:
                 for pos, data in zip(positions, data_to_plot):
                     median = np.median(data)
-                    ax.text(pos, median, f'{median:.1f}', 
+                    ax.text(pos, median, f'{median:.1f}',
                            ha='center', va='bottom', fontsize=8, fontweight='bold')
     
     # Set labels and title
     ax.set_xlabel(xlabel, fontsize=12, fontweight='bold')
     ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
     ax.set_title(title, fontsize=14, fontweight='bold')
-    
+
     # Set x-axis ticks
     ax.set_xticks(range(len(x_positions)))
     if format_x_as_filesize:
         ax.set_xticklabels([format_file_size(x) for x in x_positions], rotation=45, ha='right')
     else:
         ax.set_xticklabels([str(x) for x in x_positions])
-    
+
     # Add legend
-    ax.legend(loc='best', fontsize=10)
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc='best', fontsize=10)
     
     # Add grid
     ax.grid(True, alpha=0.3, linestyle='--')
@@ -208,8 +221,8 @@ def create_box_plot(all_data, title, ylabel, xlabel, output_filename, format_x_a
 
 def create_simple_box_plot(all_data, title, ylabel, output_filename, show_median_values=True):
     """
-    Create a simple box and whisker plot with all data grouped by test name only.
-    
+    Create a simple violin plot with all data grouped by test name only.
+
     Args:
         all_data: Dictionary mapping test_name -> {file_size/num_files: [values]}
         title: Plot title
@@ -218,45 +231,52 @@ def create_simple_box_plot(all_data, title, ylabel, output_filename, show_median
         show_median_values: If True, display median values on the plot
     """
     fig, ax = plt.subplots(figsize=(12, 7))
-    
+
     # Prepare data for plotting - combine all values for each test
     num_tests = len(all_data)
     colors = plt.cm.Set3(np.linspace(0, 1, num_tests))
-    
+
     positions = []
     data_to_plot = []
     test_labels = []
-    
+
     # Sort test names alphabetically for consistent ordering
     for idx, (test_name, test_data) in enumerate(sorted(all_data.items())):
         # Combine all values across all x-positions (file sizes, etc.) for this test
         all_values = []
         for values_list in test_data.values():
             all_values.extend(values_list)
-        
+
         if all_values:
             positions.append(idx)
             data_to_plot.append(all_values)
             test_labels.append(test_name)
-    
-    # Create box plots
+
+    # Create violin plots
     if data_to_plot:
-        bp = ax.boxplot(data_to_plot, positions=positions, widths=0.6,
-                       patch_artist=True,
-                       boxprops=dict(alpha=0.7),
-                       medianprops=dict(color='red', linewidth=2),
-                       whiskerprops=dict(linewidth=1.5),
-                       capprops=dict(linewidth=1.5))
-        
-        # Color each box
-        for patch, color in zip(bp['boxes'], colors):
-            patch.set_facecolor(color)
-        
+        parts = ax.violinplot(data_to_plot, positions=positions, widths=0.6,
+                              showmeans=True, showmedians=True)
+
+        # Hide each violin body
+        for pc in parts['bodies']:
+            pc.set_alpha(0)
+
+        # Color all statistical lines to match their colors
+        for partname in ('cbars', 'cmins', 'cmaxes', 'cmeans'):
+            if partname in parts:
+                parts[partname].set_edgecolors(colors)
+                parts[partname].set_linewidth(2)
+
+        # Make medians match the violin colors
+        if 'cmedians' in parts:
+            parts['cmedians'].set_edgecolors(colors)
+            parts['cmedians'].set_linewidth(2)
+
         # Add median values as text if requested
         if show_median_values:
             for pos, data in zip(positions, data_to_plot):
                 median = np.median(data)
-                ax.text(pos, median, f'{median:.1f}', 
+                ax.text(pos, median, f'{median:.1f}',
                        ha='center', va='bottom', fontsize=8, fontweight='bold')
     
     # Set labels and title
