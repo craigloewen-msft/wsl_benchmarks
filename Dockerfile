@@ -19,16 +19,23 @@ RUN node -v && npm -v
 
 WORKDIR /app
 
-# Copy project files
-COPY *.py .
+# Copy cache configuration and setup files FIRST (these rarely change)
+# This allows Docker to cache the expensive cache setup step
+COPY cache_config.py .
+COPY cache_utils.py .
+COPY setup_caches.py .
+
+# Setup caches (this layer gets cached as long as cache_config.py doesn't change)
+RUN python setup_caches.py
+
+# Copy remaining project files (these may change more frequently)
+COPY file_io_benchmark.py .
+COPY generate_plots.py .
 COPY pyproject.toml .
 COPY README.md .
 
 # Install Python dependencies from pyproject.toml
 RUN pip install .
-
-# Setup caches
-RUN python setup_caches.py
 
 # Run generate_plots.py
 CMD ["python", "generate_plots.py"]

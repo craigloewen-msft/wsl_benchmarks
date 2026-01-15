@@ -16,15 +16,46 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import json
 
+from cache_config import (
+    PIP_PACKAGES,
+    PIP_EXTRA_INDEX_URL,
+    NPM_PACKAGE_JSON,
+    CACHE_DIR_NAME,
+)
+
 
 class FileIOBenchmark:
-    def __init__(self, test_dir: str = "benchmark_temp", data_size_gb: float = 2.0, name: str = "default"):
-        self.test_dir = Path(test_dir)
+
+    def __init__(self, test_dir: str = "benchmark_temp", data_size_gb: float = 2.0, name: str = "default", working_dir: str = "./"):
+        self.working_dir = Path(working_dir).resolve()
+        self.script_dir = Path(__file__).parent.resolve()  # Directory where the script lives
+        self.test_dir = self.working_dir / test_dir
         self.data_size_gb = data_size_gb
         self.name = name
         self.results = {}
         self.all_runs = []  # Store results from all runs
-        self.cache_dir = Path("benchmark_cache")  # Directory for offline caches
+        self.cache_dir = self.working_dir / "benchmark_cache"  # Directory for offline caches
+        
+        # Ensure working directory exists
+        self.working_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy benchmark_cache from script directory if it doesn't exist in working directory
+        self._ensure_cache_exists()
+    
+    def _ensure_cache_exists(self):
+        """Copy benchmark_cache from script directory to working directory if needed"""
+        source_cache = self.script_dir / "benchmark_cache"
+        
+        if not self.cache_dir.exists():
+            if source_cache.exists():
+                print(f"Copying benchmark_cache from {source_cache} to {self.cache_dir}...")
+                shutil.copytree(source_cache, self.cache_dir)
+                print(f"✓ benchmark_cache copied successfully")
+            else:
+                print(f"Warning: benchmark_cache not found at {source_cache}")
+                print("Some tests may be skipped. Run setup_caches.py first to create the cache.")
+        else:
+            print(f"Using existing benchmark_cache at {self.cache_dir}")
         
     def setup(self):
         """Create test directory"""
@@ -260,93 +291,6 @@ class FileIOBenchmark:
             pass
         return total_size
     
-    def setup_npm_cache(self) -> bool:
-        """Setup npm offline cache. Run this once with internet connection."""
-        print("\n" + "=" * 70)
-        print("SETTING UP NPM OFFLINE CACHE")
-        print("=" * 70)
-        
-        # Check if npm is available
-        success, output, _ = self._run_command(['npm', '--version'])
-        if not success:
-            print("npm is not installed. Skipping npm cache setup.")
-            return False
-        
-        npm_cache_dir = self.cache_dir / "npm_cache"
-        npm_test_dir = self.cache_dir / "npm_test_project"
-        
-        # Create cache directory
-        self.cache_dir.mkdir(exist_ok=True)
-        
-        # Clean up old test directory if it exists
-        if npm_test_dir.exists():
-            shutil.rmtree(npm_test_dir)
-        
-        npm_test_dir.mkdir(parents=True)
-        
-        # Create a package.json with popular packages
-        package_json = {
-            "name": "benchmark-test",
-            "version": "1.0.0",
-            "dependencies": {
-                "express": "4.18.2",
-                "lodash": "4.17.21",
-                "axios": "1.6.0",
-                "react": "18.2.0",
-                "react-dom": "18.2.0",
-                "@angular/core": "17.0.0",
-                "@angular/common": "17.0.0",
-                "@angular/platform-browser": "17.0.0",
-                "vue": "3.3.8",
-                "next": "14.0.3",
-                "typescript": "5.3.2",
-                "webpack": "5.89.0",
-                "eslint": "8.54.0",
-                "jest": "29.7.0",
-                "@babel/core": "7.23.5",
-                "prettier": "3.1.0",
-                "tailwindcss": "3.3.5"
-            }
-        }
-        
-        with open(npm_test_dir / "package.json", 'w') as f:
-            json.dump(package_json, f, indent=2)
-        
-        print("\nInstalling packages to create cache...")
-        print(f"Cache directory: {npm_cache_dir.absolute()}")
-        
-        # Set up custom cache directory and install
-        env = os.environ.copy()
-        env['npm_config_cache'] = str(npm_cache_dir.absolute())
-        
-        success, output, duration = self._run_command(
-            ['npm', 'install'],
-            cwd=npm_test_dir,
-            env=env
-        )
-        
-        if success:
-            print(f"✓ npm cache created successfully in {duration:.2f} seconds")
-            
-            # Verify package-lock.json was created
-            if (npm_test_dir / "package-lock.json").exists():
-                print("✓ package-lock.json created")
-            
-            # Count cached files
-            if npm_cache_dir.exists():
-                cached_files = self._count_files_recursive(npm_cache_dir)
-                cache_size = self._get_directory_size(npm_cache_dir)
-                print(f"✓ Cache contains {cached_files} files ({self._format_size(cache_size)})")
-            
-            # Clean up node_modules but keep package.json and package-lock.json
-            if (npm_test_dir / "node_modules").exists():
-                shutil.rmtree(npm_test_dir / "node_modules")
-            
-            return True
-        else:
-            print(f"✗ Failed to create npm cache: {output}")
-            return False
-    
     def test_npm_install_offline(self) -> Optional[Dict]:
         """Test npm install using offline cache"""
         npm_cache_dir = self.cache_dir / "npm_cache"
@@ -423,58 +367,6 @@ class FileIOBenchmark:
                 shutil.rmtree(test_install_dir)
             return None
     
-    def setup_pip_cache(self) -> bool:
-        """Setup pip offline cache. Run this once with internet connection."""
-        print("\n" + "=" * 70)
-        print("SETTING UP PIP OFFLINE CACHE")
-        print("=" * 70)
-        
-        # Check if pip is available
-        success, output, _ = self._run_command(['pip', '--version'])
-        if not success:
-            print("pip is not installed. Skipping pip cache setup.")
-            return False
-        
-        pip_cache_dir = self.cache_dir / "pip_wheels"
-        
-        # Create cache directory
-        pip_cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Download popular packages (compatible with Python 3.12+)
-        packages = [
-            'requests',
-            'flask',
-            'click',
-            'jinja2',
-            'urllib3',
-            'certifi',
-            'charset-normalizer',
-            'idna',
-            'werkzeug',
-            'markupsafe',
-            'itsdangerous',
-            'blinker'
-        ]
-        
-        print(f"\nDownloading packages to: {pip_cache_dir.absolute()}")
-        print(f"Packages: {', '.join(packages)}")
-        
-        cmd = ['pip', 'download', '-d', str(pip_cache_dir)] + packages
-        success, output, duration = self._run_command(cmd)
-        
-        if success:
-            print(f"✓ pip cache created successfully in {duration:.2f} seconds")
-            
-            # Count cached files
-            wheel_files = list(pip_cache_dir.glob('*.whl')) + list(pip_cache_dir.glob('*.tar.gz'))
-            cache_size = sum(f.stat().st_size for f in wheel_files)
-            print(f"✓ Cache contains {len(wheel_files)} package files ({self._format_size(cache_size)})")
-            
-            return True
-        else:
-            print(f"✗ Failed to create pip cache: {output}")
-            return False
-    
     def test_pip_install_offline(self) -> Optional[Dict]:
         """Test pip install using offline wheel cache"""
         pip_cache_dir = self.cache_dir / "pip_wheels"
@@ -517,20 +409,7 @@ class FileIOBenchmark:
             return None
         
         # Get list of packages to install
-        packages = [
-            'requests',
-            'flask',
-            'click',
-            'jinja2',
-            'urllib3',
-            'certifi',
-            'charset-normalizer',
-            'idna',
-            'werkzeug',
-            'markupsafe',
-            'itsdangerous',
-            'blinker'
-        ]
+        packages = PIP_PACKAGES
         
         # Install from local cache
         cmd = [
@@ -955,7 +834,7 @@ class FileIOBenchmark:
     
     def _save_all_results(self):
         """Save all run results to JSON file"""
-        output_file = f"benchmark_results_{self.name}.json"
+        output_file = self.working_dir / f"benchmark_results_{self.name}.json"
         
         # Calculate aggregated statistics
         aggregated_stats = {}
@@ -1004,15 +883,25 @@ class FileIOBenchmark:
     
 def main():
     import sys
+    import argparse
     
     # Configure the amount of data per test (in GB)
     data_size_gb = 1.0
     num_runs = 5  # Number of full benchmark suite iterations
     
-    # Get test name from command line argument, default to "default"
-    test_name = sys.argv[1] if len(sys.argv) > 1 else "default"
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='File I/O Performance Benchmark')
+    parser.add_argument('test_name', nargs='?', default='default',
+                        help='Name for this test run (default: "default")')
+    parser.add_argument('--working-folder', '-w', default='./',
+                        help='Working folder where tests will run (default: "./")')
     
-    benchmark = FileIOBenchmark(data_size_gb=data_size_gb, name=test_name)
+    args = parser.parse_args()
+    
+    print(f"Test name: {args.test_name}")
+    print(f"Working folder: {Path(args.working_folder).resolve()}")
+    
+    benchmark = FileIOBenchmark(data_size_gb=data_size_gb, name=args.test_name, working_dir=args.working_folder)
     benchmark.run_multiple_benchmarks(num_runs=num_runs)
     print("\n" + "=" * 70)
     print("All benchmarks complete!")

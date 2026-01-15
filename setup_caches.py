@@ -2,9 +2,12 @@
 """
 Setup script for creating offline caches for real-world benchmarks.
 Run this once with an internet connection before running benchmarks offline.
+
+This script only depends on cache_config.py and cache_utils.py, allowing
+Docker to cache this layer independently of benchmark test parameters.
 """
 
-from file_io_benchmark import FileIOBenchmark
+from cache_utils import setup_npm_cache, setup_pip_cache
 
 
 def main():
@@ -16,13 +19,11 @@ def main():
     print("The caches will be stored in ./benchmark_cache/")
     print("\n" + "=" * 70)
     
-    benchmark = FileIOBenchmark()
-    
     # Setup npm cache
-    npm_success = benchmark.setup_npm_cache()
+    npm_success = setup_npm_cache()
     
     # Setup pip cache
-    pip_success = benchmark.setup_pip_cache()
+    pip_success = setup_pip_cache()
     
     # Summary
     print("\n" + "=" * 70)

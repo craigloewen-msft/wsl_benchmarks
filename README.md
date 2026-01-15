@@ -4,6 +4,13 @@ A Python script to test file system I/O performance with various file sizes and 
 
 ## Quick Start
 
+### Docker
+
+```bash
+docker build -t test-image .
+docker run --rm -it test-image python file_io_benchmark.py
+```
+
 ### First-time setup (with internet connection):
 
 ```bash
