@@ -4,4 +4,10 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "matplotlib",
+    "numpy",
+]
+
+[tool.setuptools]
+py-modules = ["file_io_benchmark", "generate_plots", "setup_caches"]

@@ -1,4 +1,4 @@
-FROM python:latest
+FROM python:3.12
 
 # Set environment variables for NVM
 ENV NVM_DIR=/root/.nvm
@@ -16,3 +16,19 @@ RUN bash -c "source $NVM_DIR/nvm.sh && nvm use default && ln -sf \$(which node) 
 
 # Verify installation
 RUN node -v && npm -v
+
+WORKDIR /app
+
+# Copy project files
+COPY *.py .
+COPY pyproject.toml .
+COPY README.md .
+
+# Install Python dependencies from pyproject.toml
+RUN pip install .
+
+# Setup caches
+RUN python setup_caches.py
+
+# Run generate_plots.py
+CMD ["python", "generate_plots.py"]
