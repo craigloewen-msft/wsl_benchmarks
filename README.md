@@ -8,7 +8,7 @@ A Python script to test file system I/O performance with various file sizes and 
 
 ```bash
 docker build -t test-image .
-docker run --rm -it test-image python file_io_benchmark.py
+ docker run --rm -it -v $(pwd)/out:/out test-image python file_io_benchmark.py wsl-ext4 --working-folder /out  
 ```
 
 ### First-time setup (with internet connection):

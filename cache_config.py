@@ -51,5 +51,15 @@ NPM_PACKAGE_JSON = {
     }
 }
 
+# Git repositories to clone for offline cache benchmark
+# Using popular open-source repos with lots of files for a good benchmark
+GIT_REPOS = [
+    {
+        'name': 'vscode',
+        'url': 'https://github.com/microsoft/vscode.git',
+        'depth': 1,  # Shallow clone to save space but still get all files
+    },
+]
+
 # Default cache directory name
 CACHE_DIR_NAME = "benchmark_cache"

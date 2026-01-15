@@ -19,6 +19,7 @@ from cache_config import (
     PIP_EXTRA_INDEX_URL,
     NPM_PACKAGE_JSON,
     CACHE_DIR_NAME,
+    GIT_REPOS,
 )
 
 
@@ -205,19 +206,95 @@ def setup_pip_cache(cache_dir: Optional[Path] = None) -> bool:
         return False
 
 
-def setup_all_caches(cache_dir: Optional[Path] = None) -> Tuple[bool, bool]:
+def setup_git_cache(cache_dir: Optional[Path] = None) -> bool:
     """
-    Setup all caches (npm and pip).
+    Setup git offline cache by creating bare repositories.
+    Run this once with internet connection.
     
     Args:
         cache_dir: Directory to store caches. Defaults to ./benchmark_cache/
     
     Returns:
-        Tuple of (npm_success, pip_success)
+        True if cache was created successfully, False otherwise.
+    """
+    print("\n" + "=" * 70)
+    print("SETTING UP GIT OFFLINE CACHE")
+    print("=" * 70)
+    
+    if cache_dir is None:
+        cache_dir = Path(".") / CACHE_DIR_NAME
+    
+    # Check if git is available
+    success, output, _ = _run_command(['git', '--version'])
+    if not success:
+        print("git is not installed. Skipping git cache setup.")
+        return False
+    
+    git_cache_dir = cache_dir / "git_repos"
+    
+    # Create cache directory
+    git_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    all_success = True
+    
+    for repo_config in GIT_REPOS:
+        repo_name = repo_config['name']
+        repo_url = repo_config['url']
+        depth = repo_config.get('depth', None)
+        
+        bare_repo_dir = git_cache_dir / f"{repo_name}.git"
+        
+        print(f"\nCloning {repo_name} as bare repository...")
+        print(f"URL: {repo_url}")
+        print(f"Destination: {bare_repo_dir.absolute()}")
+        
+        # Remove existing repo if it exists
+        if bare_repo_dir.exists():
+            print(f"  Removing existing repository...")
+            shutil.rmtree(bare_repo_dir)
+        
+        # Clone as bare repository (no working directory, just git data)
+        cmd = ['git', 'clone', '--bare']
+        if depth:
+            cmd.extend(['--depth', str(depth)])
+        cmd.extend([repo_url, str(bare_repo_dir)])
+        
+        success, output, duration = _run_command(cmd)
+        
+        if success:
+            print(f"✓ {repo_name} cloned successfully in {duration:.2f} seconds")
+            
+            # Get repository stats
+            repo_size = _get_directory_size(bare_repo_dir)
+            file_count = _count_files_recursive(bare_repo_dir)
+            print(f"  Repository size: {_format_size(repo_size)}")
+            print(f"  Files in bare repo: {file_count}")
+        else:
+            print(f"✗ Failed to clone {repo_name}: {output[:200]}")
+            all_success = False
+    
+    if all_success:
+        print(f"\n✓ Git cache created successfully")
+    else:
+        print(f"\n⚠ Some repositories failed to clone")
+    
+    return all_success
+
+
+def setup_all_caches(cache_dir: Optional[Path] = None) -> Tuple[bool, bool, bool]:
+    """
+    Setup all caches (npm, pip, and git).
+    
+    Args:
+        cache_dir: Directory to store caches. Defaults to ./benchmark_cache/
+    
+    Returns:
+        Tuple of (npm_success, pip_success, git_success)
     """
     npm_success = setup_npm_cache(cache_dir)
     pip_success = setup_pip_cache(cache_dir)
-    return npm_success, pip_success
+    git_success = setup_git_cache(cache_dir)
+    return npm_success, pip_success, git_success
 
 
 if __name__ == "__main__":

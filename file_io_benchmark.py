@@ -21,6 +21,7 @@ from cache_config import (
     PIP_EXTRA_INDEX_URL,
     NPM_PACKAGE_JSON,
     CACHE_DIR_NAME,
+    GIT_REPOS,
 )
 
 
@@ -451,6 +452,82 @@ class FileIOBenchmark:
                 shutil.rmtree(venv_dir)
             return None
     
+    def test_git_clone_offline(self) -> Optional[Dict]:
+        """Test git clone using offline bare repository cache"""
+        git_cache_dir = self.cache_dir / "git_repos"
+        
+        # Check if cache exists
+        if not git_cache_dir.exists():
+            print("  git cache not found. Run setup_git_cache() first.")
+            return None
+        
+        # Check if git is available
+        success, _, _ = self._run_command(['git', '--version'])
+        if not success:
+            print("  git is not installed. Skipping test.")
+            return None
+        
+        # Check if we have any cached repositories
+        if not GIT_REPOS:
+            print("  No git repositories configured.")
+            return None
+        
+        total_duration = 0
+        total_files = 0
+        total_bytes = 0
+        repos_cloned = 0
+        
+        for repo_config in GIT_REPOS:
+            repo_name = repo_config['name']
+            bare_repo_path = git_cache_dir / f"{repo_name}.git"
+            
+            if not bare_repo_path.exists():
+                print(f"  Cache for {repo_name} not found. Skipping.")
+                continue
+            
+            # Create destination directory for clone
+            clone_dest = self.test_dir / f"git_clone_{repo_name}"
+            if clone_dest.exists():
+                shutil.rmtree(clone_dest)
+            
+            # Clone from local bare repository (offline)
+            start_time = time.time()
+            success, output, duration = self._run_command(
+                ['git', 'clone', str(bare_repo_path.absolute()), str(clone_dest)]
+            )
+            elapsed = time.time() - start_time
+            
+            if success:
+                # Count cloned files
+                files_created = self._count_files_recursive(clone_dest)
+                clone_size = self._get_directory_size(clone_dest)
+                
+                total_duration += elapsed
+                total_files += files_created
+                total_bytes += clone_size
+                repos_cloned += 1
+                
+                print(f"    {repo_name}: {files_created} files, {self._format_size(clone_size)} in {elapsed:.2f}s")
+                
+                # Clean up
+                shutil.rmtree(clone_dest)
+            else:
+                print(f"  git clone failed for {repo_name}: {output[:200]}")
+        
+        if repos_cloned > 0:
+            return {
+                'duration_sec': total_duration,
+                'files_created': total_files,
+                'total_bytes': total_bytes,
+                'total_size_formatted': self._format_size(total_bytes),
+                'files_per_sec': total_files / total_duration if total_duration > 0 else 0,
+                'speed_bytes_per_sec': total_bytes / total_duration if total_duration > 0 else 0,
+                'speed_formatted': self._format_speed(total_bytes / total_duration) if total_duration > 0 else 'N/A',
+                'repos_cloned': repos_cloned
+            }
+        else:
+            return None
+    
     def run_benchmark_suite(self):
         """Run complete benchmark suite"""
         print("=" * 70)
@@ -576,7 +653,7 @@ class FileIOBenchmark:
             
             # Real-world package manager tests
             print("\n" + "=" * 70)
-            print("REAL-WORLD TESTS (Package Managers)")
+            print("REAL-WORLD TESTS (Package Managers & Git)")
             print("=" * 70)
             
             print("\nTesting npm install (offline)...")
@@ -603,6 +680,19 @@ class FileIOBenchmark:
                 print(f"  Files per second: {result['files_per_sec']:.2f}")
             else:
                 print("  Skipped (cache not available or pip not installed)")
+            
+            print("\nTesting git clone (offline)...")
+            result = self.test_git_clone_offline()
+            if result:
+                self.results['git_clone'] = result
+                print(f"  Duration: {result['duration_sec']:.3f} seconds")
+                print(f"  Files created: {result['files_created']}")
+                print(f"  Repositories cloned: {result['repos_cloned']}")
+                print(f"  Total size: {result['total_size_formatted']}")
+                print(f"  Average speed: {result['speed_formatted']}")
+                print(f"  Files per second: {result['files_per_sec']:.2f}")
+            else:
+                print("  Skipped (cache not available or git not installed)")
             
             # Store results from this run
             return self.results
@@ -657,6 +747,12 @@ class FileIOBenchmark:
             print(f"\npip install (offline): {self.results['pip_install']['duration_sec']:.3f} sec")
             print(f"  Files created: {self.results['pip_install']['files_created']}")
             print(f"  Speed: {self.results['pip_install']['speed_formatted']}")
+        
+        if 'git_clone' in self.results:
+            print(f"\ngit clone (offline): {self.results['git_clone']['duration_sec']:.3f} sec")
+            print(f"  Files created: {self.results['git_clone']['files_created']}")
+            print(f"  Repos cloned: {self.results['git_clone']['repos_cloned']}")
+            print(f"  Speed: {self.results['git_clone']['speed_formatted']}")
     
     def _calculate_statistics(self, values: List[float]) -> Dict:
         """Calculate mean and standard deviation for a list of values"""
@@ -779,7 +875,7 @@ class FileIOBenchmark:
         
         # Print real-world test results
         print("\n" + "-" * 70)
-        print("REAL-WORLD TESTS (Package Managers)")
+        print("REAL-WORLD TESTS (Package Managers & Git)")
         print("-" * 70)
         
         if 'npm_install' in metrics:
@@ -804,6 +900,18 @@ class FileIOBenchmark:
                 print(f"  Files Created: {stats['mean']:.0f} ± {stats['std_dev']:.0f}")
             if 'speed_bytes_per_sec' in metrics['pip_install']:
                 stats = self._calculate_statistics(metrics['pip_install']['speed_bytes_per_sec'])
+                print(f"  Speed: {self._format_speed(stats['mean'])} ± {self._format_speed(stats['std_dev'])}")
+        
+        if 'git_clone' in metrics:
+            print(f"\ngit clone (offline):")
+            if 'duration_sec' in metrics['git_clone']:
+                stats = self._calculate_statistics(metrics['git_clone']['duration_sec'])
+                print(f"  Duration: {stats['mean']:.3f} sec ± {stats['std_dev']:.3f} sec")
+            if 'files_created' in metrics['git_clone']:
+                stats = self._calculate_statistics(metrics['git_clone']['files_created'])
+                print(f"  Files Created: {stats['mean']:.0f} ± {stats['std_dev']:.0f}")
+            if 'speed_bytes_per_sec' in metrics['git_clone']:
+                stats = self._calculate_statistics(metrics['git_clone']['speed_bytes_per_sec'])
                 print(f"  Speed: {self._format_speed(stats['mean'])} ± {self._format_speed(stats['std_dev'])}")
     
     def run_multiple_benchmarks(self, num_runs: int = 5):
