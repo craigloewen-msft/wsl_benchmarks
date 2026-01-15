@@ -43,6 +43,49 @@ class FileIOBenchmark:
         # Copy benchmark_cache from script directory if it doesn't exist in working directory
         self._ensure_cache_exists()
     
+    def _drop_caches(self) -> bool:
+        """Drop filesystem caches to ensure consistent benchmark results.
+        
+        On Linux, this syncs the filesystem and drops page cache, dentries, and inodes.
+        Requires root privileges or sudo access.
+        
+        Returns:
+            True if cache was successfully dropped, False otherwise.
+        """
+        print("  Dropping filesystem caches...")
+        
+        try:
+            # First sync to flush any pending writes
+            subprocess.run(['sync'], check=True)
+            
+            # Try to drop caches (requires root)
+            # echo 3 drops page cache, dentries, and inodes
+            result = subprocess.run(
+                ['sudo', '-n', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                print("  Filesystem caches dropped successfully.")
+                return True
+            else:
+                # Try without sudo (in case running as root)
+                result = subprocess.run(
+                    ['sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    print("  Filesystem caches dropped successfully.")
+                    return True
+                else:
+                    print("  Warning: Could not drop caches (requires root privileges).")
+                    return False
+        except Exception as e:
+            print(f"  Warning: Could not drop caches: {e}")
+            return False
+
     def _ensure_cache_exists(self):
         """Copy benchmark_cache from script directory to working directory if needed"""
         source_cache = self.script_dir / "benchmark_cache"
@@ -924,6 +967,9 @@ class FileIOBenchmark:
             print(f"\n{'#' * 70}")
             print(f"# RUN {i + 1} of {num_runs}")
             print(f"{'#' * 70}\n")
+            
+            # Drop filesystem caches before each run for consistent results
+            self._drop_caches()
             
             self.setup()
             run_results = self.run_benchmark_suite()
