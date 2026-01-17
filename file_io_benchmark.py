@@ -53,48 +53,51 @@ class FileIOBenchmark:
             True if cache was successfully dropped, False otherwise.
         """
         print("  Dropping filesystem caches...")
-        
-        try:
             # First sync to flush any pending writes
-            subprocess.run(['sync'], check=True)
+        subprocess.run(['sync'], check=True)
+        
+        # Try to drop caches (requires root)
+        # echo 3 drops page cache, dentries, and inodes
+        result = subprocess.run(
+            [ 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
+            capture_output=True,
+            text=True
+        )
             
-            # Try to drop caches (requires root)
-            # echo 3 drops page cache, dentries, and inodes
-            result = subprocess.run(
-                ['sudo', '-n', 'sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
-                capture_output=True,
-                text=True
-            )
-            
-            if result.returncode == 0:
-                print("  Filesystem caches dropped successfully.")
-                return True
-            else:
-                # Try without sudo (in case running as root)
-                result = subprocess.run(
-                    ['sh', '-c', 'echo 3 > /proc/sys/vm/drop_caches'],
-                    capture_output=True,
-                    text=True
-                )
-                if result.returncode == 0:
-                    print("  Filesystem caches dropped successfully.")
-                    return True
-                else:
-                    print("  Warning: Could not drop caches (requires root privileges).")
-                    return False
-        except Exception as e:
-            print(f"  Warning: Could not drop caches: {e}")
+        if result.returncode == 0:
+            print("  Filesystem caches dropped successfully.")
+            return True
+        else:
             return False
 
     def _ensure_cache_exists(self):
         """Copy benchmark_cache from script directory to working directory if needed"""
         source_cache = self.script_dir / "benchmark_cache"
-        
+
         if not self.cache_dir.exists():
             if source_cache.exists():
                 print(f"Copying benchmark_cache from {source_cache} to {self.cache_dir}...")
                 shutil.copytree(source_cache, self.cache_dir)
                 print(f"✓ benchmark_cache copied successfully")
+
+                # Set permissive permissions and ownership
+                print(f"Setting permissions on {self.cache_dir}...")
+                try:
+                    # Make all files and directories readable, writable, and executable by everyone
+                    subprocess.run(['chmod', '-R', '777', str(self.cache_dir)], check=False)
+
+                    # Try to change ownership to current user (may not be needed/possible in all environments)
+                    import pwd
+                    try:
+                        uid = os.getuid()
+                        gid = os.getgid()
+                        subprocess.run(['chown', '-R', f'{uid}:{gid}', str(self.cache_dir)], check=False)
+                    except:
+                        pass  # Ignore errors if chown fails (e.g., already correct owner)
+
+                    print(f"✓ Permissions set successfully")
+                except Exception as e:
+                    print(f"Warning: Could not set all permissions: {e}")
             else:
                 print(f"Warning: benchmark_cache not found at {source_cache}")
                 print("Some tests may be skipped. Run setup_caches.py first to create the cache.")
@@ -289,29 +292,37 @@ class FileIOBenchmark:
             'avg_time_per_file_ms': (elapsed / actual_count * 1000) if actual_count > 0 else 0
         }
     
-    def _run_command(self, cmd: List[str], cwd: Optional[Path] = None, 
-                     env: Optional[Dict] = None) -> Tuple[bool, str, float]:
-        """Run a shell command and return success status, output, and duration"""
+    def _run_command(self, cmd: List[str], cwd: Optional[Path] = None,
+                     env: Optional[Dict] = None, timeout: int = 300,
+                     check: bool = True) -> Tuple[bool, str, float]:
+        """Run a shell command and return success status, output, and duration
+
+        Args:
+            cmd: Command and arguments to execute
+            cwd: Working directory for command
+            env: Environment variables
+            timeout: Timeout in seconds (default: 300)
+            check: If True, raise exception on non-zero return code (default: True)
+
+        Raises:
+            subprocess.TimeoutExpired: If command times out
+            subprocess.CalledProcessError: If command fails and check=True
+            Exception: For other errors
+        """
         start_time = time.time()
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=cwd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-            elapsed = time.time() - start_time
-            success = result.returncode == 0
-            output = result.stdout + result.stderr
-            return success, output, elapsed
-        except subprocess.TimeoutExpired:
-            elapsed = time.time() - start_time
-            return False, "Command timed out", elapsed
-        except Exception as e:
-            elapsed = time.time() - start_time
-            return False, str(e), elapsed
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=check
+        )
+        elapsed = time.time() - start_time
+        success = result.returncode == 0
+        output = result.stdout + result.stderr
+        return success, output, elapsed
     
     def _count_files_recursive(self, directory: Path) -> int:
         """Count all files recursively in a directory"""
@@ -346,7 +357,7 @@ class FileIOBenchmark:
             return None
         
         # Check if npm is available
-        success, _, _ = self._run_command(['npm', '--version'])
+        success, _, _ = self._run_command(['npm', '--version'], check=False)
         if not success:
             print("  npm is not installed. Skipping test.")
             return None
@@ -364,52 +375,46 @@ class FileIOBenchmark:
         # Run npm ci with offline cache
         env = os.environ.copy()
         env['npm_config_cache'] = str(npm_cache_dir.absolute())
-        
+
         start_time = time.time()
-        success, output, duration = self._run_command(
-            ['npm', 'ci', '--offline', '--prefer-offline'],
-            cwd=test_install_dir,
-            env=env
-        )
-        
-        if not success:
-            # If offline fails, the cache might not be complete
-            print(f"  Warning: npm ci --offline failed, trying --prefer-offline only")
+        try:
             success, output, duration = self._run_command(
-                ['npm', 'ci', '--prefer-offline'],
+                ['npm', 'ci', '--offline', '--prefer-offline'],
                 cwd=test_install_dir,
                 env=env
             )
-        
+        except subprocess.CalledProcessError as e:
+            error_output = e.stdout + e.stderr if e.stdout and e.stderr else (e.stdout or e.stderr or "")
+            raise RuntimeError(
+                f"npm ci failed with exit code {e.returncode}\n"
+                f"Command: {' '.join(e.cmd)}\n"
+                f"Working directory: {test_install_dir}\n"
+                f"Output:\n{error_output}"
+            ) from e
+
         elapsed = time.time() - start_time
-        
-        if success:
-            # Count installed files
-            node_modules = test_install_dir / "node_modules"
-            if node_modules.exists():
-                files_created = self._count_files_recursive(node_modules)
-                total_size = self._get_directory_size(node_modules)
-            else:
-                files_created = 0
-                total_size = 0
-            
-            # Clean up
-            shutil.rmtree(test_install_dir)
-            
-            return {
-                'duration_sec': elapsed,
-                'files_created': files_created,
-                'total_bytes': total_size,
-                'total_size_formatted': self._format_size(total_size),
-                'files_per_sec': files_created / elapsed if elapsed > 0 else 0,
-                'speed_bytes_per_sec': total_size / elapsed if elapsed > 0 else 0,
-                'speed_formatted': self._format_speed(total_size / elapsed) if elapsed > 0 else 'N/A'
-            }
+
+        # Count installed files
+        node_modules = test_install_dir / "node_modules"
+        if node_modules.exists():
+            files_created = self._count_files_recursive(node_modules)
+            total_size = self._get_directory_size(node_modules)
         else:
-            print(f"  npm install failed: {output[:200]}")
-            if test_install_dir.exists():
-                shutil.rmtree(test_install_dir)
-            return None
+            files_created = 0
+            total_size = 0
+
+        # Clean up
+        shutil.rmtree(test_install_dir)
+
+        return {
+            'duration_sec': elapsed,
+            'files_created': files_created,
+            'total_bytes': total_size,
+            'total_size_formatted': self._format_size(total_size),
+            'files_per_sec': files_created / elapsed if elapsed > 0 else 0,
+            'speed_bytes_per_sec': total_size / elapsed if elapsed > 0 else 0,
+            'speed_formatted': self._format_speed(total_size / elapsed) if elapsed > 0 else 'N/A'
+        }
     
     def test_pip_install_offline(self) -> Optional[Dict]:
         """Test pip install using offline wheel cache"""
@@ -421,7 +426,7 @@ class FileIOBenchmark:
             return None
         
         # Check if pip is available
-        success, _, _ = self._run_command(['pip', '--version'])
+        success, _, _ = self._run_command(['pip', '--version'], check=False)
         if not success:
             print("  pip is not installed. Skipping test.")
             return None
@@ -433,67 +438,50 @@ class FileIOBenchmark:
         
         # Create virtual environment
         success, output, _ = self._run_command(['python3', '-m', 'venv', str(venv_dir)])
-        if not success:
-            # Check if it's a missing python3-venv issue
-            if 'ensurepip' in output or 'venv' in output:
-                print("  python3-venv is not installed. Install with: sudo apt install python3-venv")
-            else:
-                print(f"  Failed to create virtual environment: {output[:200]}")
-            return None
-        
+
         # Determine pip executable path
         if os.name == 'nt':  # Windows
             pip_exe = venv_dir / "Scripts" / "pip.exe"
         else:  # Unix-like
             pip_exe = venv_dir / "bin" / "pip"
-        
-        if not pip_exe.exists():
-            print(f"  pip executable not found at {pip_exe}")
-            shutil.rmtree(venv_dir)
-            return None
-        
+
         # Get list of packages to install
         packages = PIP_PACKAGES
-        
+
         # Install from local cache
         cmd = [
             str(pip_exe), 'install',
             '--no-index',
             '--find-links=' + str(pip_cache_dir.absolute())
         ] + packages
-        
+
         start_time = time.time()
-        success, output, _ = self._run_command(cmd)
+        # Use longer timeout for pip install (30 minutes for slow file systems)
+        success, output, _ = self._run_command(cmd, timeout=1800)
         elapsed = time.time() - start_time
-        
-        if success:
-            # Count installed files
-            site_packages = venv_dir / "lib"
-            if site_packages.exists():
-                files_created = self._count_files_recursive(site_packages)
-                total_size = self._get_directory_size(site_packages)
-            else:
-                files_created = 0
-                total_size = 0
-            
-            # Clean up
-            shutil.rmtree(venv_dir)
-            
-            return {
-                'duration_sec': elapsed,
-                'files_created': files_created,
-                'total_bytes': total_size,
-                'total_size_formatted': self._format_size(total_size),
-                'files_per_sec': files_created / elapsed if elapsed > 0 else 0,
-                'speed_bytes_per_sec': total_size / elapsed if elapsed > 0 else 0,
-                'speed_formatted': self._format_speed(total_size / elapsed) if elapsed > 0 else 'N/A',
-                'packages_installed': len(packages)
-            }
+
+        # Count installed files
+        site_packages = venv_dir / "lib"
+        if site_packages.exists():
+            files_created = self._count_files_recursive(site_packages)
+            total_size = self._get_directory_size(site_packages)
         else:
-            print(f"  pip install failed: {output[:200]}")
-            if venv_dir.exists():
-                shutil.rmtree(venv_dir)
-            return None
+            files_created = 0
+            total_size = 0
+
+        # Clean up
+        shutil.rmtree(venv_dir)
+
+        return {
+            'duration_sec': elapsed,
+            'files_created': files_created,
+            'total_bytes': total_size,
+            'total_size_formatted': self._format_size(total_size),
+            'files_per_sec': files_created / elapsed if elapsed > 0 else 0,
+            'speed_bytes_per_sec': total_size / elapsed if elapsed > 0 else 0,
+            'speed_formatted': self._format_speed(total_size / elapsed) if elapsed > 0 else 'N/A',
+            'packages_installed': len(packages)
+        }
     
     def test_git_clone_offline(self) -> Optional[Dict]:
         """Test git clone using offline bare repository cache"""
@@ -505,7 +493,7 @@ class FileIOBenchmark:
             return None
         
         # Check if git is available
-        success, _, _ = self._run_command(['git', '--version'])
+        success, _, _ = self._run_command(['git', '--version'], check=False)
         if not success:
             print("  git is not installed. Skipping test.")
             return None
@@ -523,79 +511,85 @@ class FileIOBenchmark:
         for repo_config in GIT_REPOS:
             repo_name = repo_config['name']
             bare_repo_path = git_cache_dir / f"{repo_name}.git"
-            
+
             if not bare_repo_path.exists():
                 print(f"  Cache for {repo_name} not found. Skipping.")
                 continue
-            
+
+            # Mark the bare repository as safe (to avoid "dubious ownership" errors)
+            self._run_command(['git', 'config', '--global', '--add', 'safe.directory', str(bare_repo_path.absolute())], check=False)
+
             # Create destination directory for clone
             clone_dest = self.test_dir / f"git_clone_{repo_name}"
             if clone_dest.exists():
                 shutil.rmtree(clone_dest)
-            
+
             # Clone from local bare repository (offline)
             start_time = time.time()
             success, output, duration = self._run_command(
                 ['git', 'clone', str(bare_repo_path.absolute()), str(clone_dest)]
             )
             elapsed = time.time() - start_time
-            
-            if success:
-                # Count cloned files
-                files_created = self._count_files_recursive(clone_dest)
-                clone_size = self._get_directory_size(clone_dest)
-                
-                total_duration += elapsed
-                total_files += files_created
-                total_bytes += clone_size
-                repos_cloned += 1
-                
-                print(f"    {repo_name}: {files_created} files, {self._format_size(clone_size)} in {elapsed:.2f}s")
-                
-                # Clean up
-                shutil.rmtree(clone_dest)
-            else:
-                print(f"  git clone failed for {repo_name}: {output[:200]}")
-        
-        if repos_cloned > 0:
-            return {
-                'duration_sec': total_duration,
-                'files_created': total_files,
-                'total_bytes': total_bytes,
-                'total_size_formatted': self._format_size(total_bytes),
-                'files_per_sec': total_files / total_duration if total_duration > 0 else 0,
-                'speed_bytes_per_sec': total_bytes / total_duration if total_duration > 0 else 0,
-                'speed_formatted': self._format_speed(total_bytes / total_duration) if total_duration > 0 else 'N/A',
-                'repos_cloned': repos_cloned
-            }
-        else:
-            return None
+
+            # Count cloned files
+            files_created = self._count_files_recursive(clone_dest)
+            clone_size = self._get_directory_size(clone_dest)
+
+            total_duration += elapsed
+            total_files += files_created
+            total_bytes += clone_size
+            repos_cloned += 1
+
+            print(f"    {repo_name}: {files_created} files, {self._format_size(clone_size)} in {elapsed:.2f}s")
+
+            # Clean up
+            shutil.rmtree(clone_dest)
+
+        return {
+            'duration_sec': total_duration,
+            'files_created': total_files,
+            'total_bytes': total_bytes,
+            'total_size_formatted': self._format_size(total_bytes),
+            'files_per_sec': total_files / total_duration if total_duration > 0 else 0,
+            'speed_bytes_per_sec': total_bytes / total_duration if total_duration > 0 else 0,
+            'speed_formatted': self._format_speed(total_bytes / total_duration) if total_duration > 0 else 'N/A',
+            'repos_cloned': repos_cloned
+        }
     
-    def run_benchmark_suite(self):
-        """Run complete benchmark suite"""
+    def run_benchmark_suite(self, selected_tests=None):
+        """Run complete benchmark suite or selected tests
+
+        Args:
+            selected_tests: Optional list of test categories to run.
+                           Options: 'seq_write', 'seq_read', 'rand_write', 'rand_read',
+                                   'metadata', 'npm', 'pip', 'git'
+                           If None, all tests will run.
+        """
         print("=" * 70)
         print("FILE I/O PERFORMANCE BENCHMARK")
         print("=" * 70)
         print(f"Test Directory: {self.test_dir.absolute()}")
+        if selected_tests:
+            print(f"Selected Tests: {', '.join(selected_tests)}")
         print()
-        
+
         self.results = {}  # Reset results for this run
+
+        self.setup()
+
+        # Define test configurations with individual data sizes
+        # Format: (name, file_size, total_data_size_for_this_test)
+        test_configs = [
+            ('Very Tiny Files (10 KB each)', 10 * 1024, 25 * 1024 * 1024),
+            ('Tiny Files (100 KB each)', 100 * 1024, 100 * 1024 * 1024),  # 100 MB total
+            ('Small Files (1 MB each)', 1 * 1024 * 1024, 500 * 1024 * 1024),  # 500 MB total
+            ('Medium Files (10 MB each)', 10 * 1024 * 1024, int(self.data_size_gb * 1024 * 1024 * 1024)),
+            ('Large Files (100 MB each)', 100 * 1024 * 1024, int(self.data_size_gb * 1024 * 1024 * 1024)),
+            ('Very Large Files (500 MB each)', 500 * 1024 * 1024, int(self.data_size_gb * 1024 * 1024 * 1024)),
+        ]
         
-        try:
-            self.setup()
-            
-            # Define test configurations with individual data sizes
-            # Format: (name, file_size, total_data_size_for_this_test)
-            test_configs = [
-                ('Very Tiny Files (10 KB each)', 10 * 1024, 25 * 1024 * 1024),
-                ('Tiny Files (100 KB each)', 100 * 1024, 100 * 1024 * 1024),  # 100 MB total
-                ('Small Files (1 MB each)', 1 * 1024 * 1024, 500 * 1024 * 1024),  # 500 MB total
-                ('Medium Files (10 MB each)', 10 * 1024 * 1024, int(self.data_size_gb * 1024 * 1024 * 1024)),
-                ('Large Files (100 MB each)', 100 * 1024 * 1024, int(self.data_size_gb * 1024 * 1024 * 1024)),
-                ('Very Large Files (500 MB each)', 500 * 1024 * 1024, int(self.data_size_gb * 1024 * 1024 * 1024)),
-            ]
-            
-            # Sequential Write Tests
+        # Sequential Write Tests
+        if selected_tests is None or 'seq_write' in selected_tests:
             print("\n" + "=" * 70)
             print(f"SEQUENTIAL WRITE TESTS")
             print("=" * 70)
@@ -608,7 +602,7 @@ class FileIOBenchmark:
                     result = self.test_sequential_write(size)
                     total_time += result['duration_sec']
                     total_bytes += size
-                
+
                 avg_speed = total_bytes / total_time if total_time > 0 else 0
                 self.results[f'seq_write_{size}'] = {
                     'duration_sec': total_time,
@@ -620,8 +614,9 @@ class FileIOBenchmark:
                 print(f"  Total Duration: {total_time:.3f} seconds")
                 print(f"  Average Speed: {self._format_speed(avg_speed)}")
                 print(f"  Files Written: {num_files}")
-            
-            # Sequential Read Tests
+        
+        # Sequential Read Tests
+        if selected_tests is None or 'seq_read' in selected_tests:
             print("\n" + "=" * 70)
             print(f"SEQUENTIAL READ TESTS")
             print("=" * 70)
@@ -634,7 +629,7 @@ class FileIOBenchmark:
                     result = self.test_sequential_read(size)
                     total_time += result['duration_sec']
                     total_bytes += size
-                
+
                 avg_speed = total_bytes / total_time if total_time > 0 else 0
                 self.results[f'seq_read_{size}'] = {
                     'duration_sec': total_time,
@@ -646,8 +641,9 @@ class FileIOBenchmark:
                 print(f"  Total Duration: {total_time:.3f} seconds")
                 print(f"  Average Speed: {self._format_speed(avg_speed)}")
                 print(f"  Files Read: {num_files}")
-            
-            # Random Write Tests
+        
+        # Random Write Tests
+        if selected_tests is None or 'rand_write' in selected_tests:
             print("\n" + "=" * 70)
             print("RANDOM WRITE TESTS (4KB blocks)")
             print("=" * 70)
@@ -662,11 +658,16 @@ class FileIOBenchmark:
                 print(f"  Duration: {result['duration_sec']:.3f} seconds")
                 print(f"  IOPS: {result['iops']:.2f}")
                 print(f"  Avg Latency: {result['avg_latency_ms']:.3f} ms")
-            
-            # Random Read Tests
+        
+        # Random Read Tests
+        if selected_tests is None or 'rand_read' in selected_tests:
             print("\n" + "=" * 70)
             print("RANDOM READ TESTS (4KB blocks)")
             print("=" * 70)
+            random_test_configs = [
+                ('100 MB file', 100 * 1024 * 1024, 5000),
+                ('500 MB file', 500 * 1024 * 1024, 10000),
+            ]
             for name, size, ops in random_test_configs:
                 print(f"\nTesting {name} ({ops} operations)...")
                 result = self.test_random_read(size, ops)
@@ -674,31 +675,34 @@ class FileIOBenchmark:
                 print(f"  Duration: {result['duration_sec']:.3f} seconds")
                 print(f"  IOPS: {result['iops']:.2f}")
                 print(f"  Avg Latency: {result['avg_latency_ms']:.3f} ms")
-            
-            # Metadata Operations
+        
+        # Metadata Operations
+        if selected_tests is None or 'metadata' in selected_tests:
             print("\n" + "=" * 70)
             print("METADATA OPERATIONS (Small File Tests)")
             print("=" * 70)
-            
+
             print("\nTesting file creation (5000 files of 4KB each)...")
             result = self.test_file_creation(5000, 4096)
             self.results['file_creation'] = result
             print(f"  Duration: {result['duration_sec']:.3f} seconds")
             print(f"  Files per second: {result['files_per_sec']:.2f}")
             print(f"  Avg time per file: {result['avg_time_per_file_ms']:.3f} ms")
-            
+
             print("\nTesting file deletion (5000 files)...")
             result = self.test_file_deletion(5000)
             self.results['file_deletion'] = result
             print(f"  Duration: {result['duration_sec']:.3f} seconds")
             print(f"  Files per second: {result['files_per_sec']:.2f}")
             print(f"  Avg time per file: {result['avg_time_per_file_ms']:.3f} ms")
-            
-            # Real-world package manager tests
+        
+        # Real-world package manager tests
+        if selected_tests is None or any(t in selected_tests for t in ['npm', 'pip', 'git']):
             print("\n" + "=" * 70)
             print("REAL-WORLD TESTS (Package Managers & Git)")
             print("=" * 70)
-            
+
+        if selected_tests is None or 'npm' in selected_tests:
             print("\nTesting npm install (offline)...")
             result = self.test_npm_install_offline()
             if result:
@@ -710,7 +714,8 @@ class FileIOBenchmark:
                 print(f"  Files per second: {result['files_per_sec']:.2f}")
             else:
                 print("  Skipped (cache not available or npm not installed)")
-            
+
+        if selected_tests is None or 'pip' in selected_tests:
             print("\nTesting pip install (offline)...")
             result = self.test_pip_install_offline()
             if result:
@@ -723,7 +728,8 @@ class FileIOBenchmark:
                 print(f"  Files per second: {result['files_per_sec']:.2f}")
             else:
                 print("  Skipped (cache not available or pip not installed)")
-            
+
+        if selected_tests is None or 'git' in selected_tests:
             print("\nTesting git clone (offline)...")
             result = self.test_git_clone_offline()
             if result:
@@ -736,12 +742,10 @@ class FileIOBenchmark:
                 print(f"  Files per second: {result['files_per_sec']:.2f}")
             else:
                 print("  Skipped (cache not available or git not installed)")
-            
-            # Store results from this run
-            return self.results
-            
-        finally:
-            self.cleanup()
+
+        # Store results from this run
+        self.cleanup()
+        return self.results
     
     def _print_summary(self):
         """Print summary of results"""
@@ -957,22 +961,27 @@ class FileIOBenchmark:
                 stats = self._calculate_statistics(metrics['git_clone']['speed_bytes_per_sec'])
                 print(f"  Speed: {self._format_speed(stats['mean'])} ± {self._format_speed(stats['std_dev'])}")
     
-    def run_multiple_benchmarks(self, num_runs: int = 5):
-        """Run benchmark suite multiple times and aggregate results"""
+    def run_multiple_benchmarks(self, num_runs: int = 5, selected_tests=None):
+        """Run benchmark suite multiple times and aggregate results
+
+        Args:
+            num_runs: Number of times to run the benchmark suite
+            selected_tests: Optional list of test categories to run
+        """
         print("\n" + "=" * 70)
         print(f"RUNNING {num_runs} BENCHMARK ITERATIONS")
         print("=" * 70)
-        
+
         for i in range(num_runs):
             print(f"\n{'#' * 70}")
             print(f"# RUN {i + 1} of {num_runs}")
             print(f"{'#' * 70}\n")
-            
+
             # Drop filesystem caches before each run for consistent results
             self._drop_caches()
-            
+
             self.setup()
-            run_results = self.run_benchmark_suite()
+            run_results = self.run_benchmark_suite(selected_tests=selected_tests)
             self.all_runs.append(run_results)
             
             # Print summary for this run
@@ -1038,25 +1047,46 @@ class FileIOBenchmark:
 def main():
     import sys
     import argparse
-    
+
     # Configure the amount of data per test (in GB)
     data_size_gb = 1.0
     num_runs = 5  # Number of full benchmark suite iterations
-    
+
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='File I/O Performance Benchmark')
+    parser = argparse.ArgumentParser(
+        description='File I/O Performance Benchmark',
+        epilog='Examples:\n'
+               '  %(prog)s                           # Run all tests\n'
+               '  %(prog)s --tests pip               # Run only pip test\n'
+               '  %(prog)s --tests pip npm           # Run pip and npm tests\n'
+               '  %(prog)s --tests seq_write seq_read  # Run sequential tests only\n',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument('test_name', nargs='?', default='default',
                         help='Name for this test run (default: "default")')
     parser.add_argument('--working-folder', '-w', default='./',
                         help='Working folder where tests will run (default: "./")')
-    
+    parser.add_argument('--tests', '-t', nargs='+', choices=[
+                            'seq_write', 'seq_read', 'rand_write', 'rand_read',
+                            'metadata', 'npm', 'pip', 'git'
+                        ],
+                        help='Select specific tests to run. Available tests: '
+                             'seq_write, seq_read, rand_write, rand_read, '
+                             'metadata, npm, pip, git. If not specified, all tests run.')
+    parser.add_argument('--runs', '-r', type=int, default=5,
+                        help='Number of benchmark iterations to run (default: 5)')
+
     args = parser.parse_args()
-    
+
     print(f"Test name: {args.test_name}")
     print(f"Working folder: {Path(args.working_folder).resolve()}")
-    
+    if args.tests:
+        print(f"Selected tests: {', '.join(args.tests)}")
+    else:
+        print("Running all tests")
+
     benchmark = FileIOBenchmark(data_size_gb=data_size_gb, name=args.test_name, working_dir=args.working_folder)
-    benchmark.run_multiple_benchmarks(num_runs=num_runs)
+    benchmark.run_multiple_benchmarks(num_runs=args.runs, selected_tests=args.tests)
     print("\n" + "=" * 70)
     print("All benchmarks complete!")
     print("=" * 70)

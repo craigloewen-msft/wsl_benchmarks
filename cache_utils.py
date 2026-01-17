@@ -35,7 +35,7 @@ def _run_command(cmd: List[str], cwd: Optional[Path] = None,
             text=True,
             cwd=cwd,
             env=env,
-            timeout=600  # 10 minute timeout
+            timeout=3600 
         )
         elapsed = time.time() - start_time
         output = result.stdout + result.stderr

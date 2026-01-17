@@ -29,13 +29,14 @@ COPY setup_caches.py .
 RUN python setup_caches.py
 
 # Copy remaining project files (these may change more frequently)
-COPY file_io_benchmark.py .
-COPY generate_plots.py .
 COPY pyproject.toml .
-COPY README.md .
 
 # Install Python dependencies from pyproject.toml
 RUN pip install .
+
+COPY file_io_benchmark.py .
+COPY generate_plots.py .
+COPY README.md .
 
 # Run generate_plots.py
 CMD ["python", "generate_plots.py"]

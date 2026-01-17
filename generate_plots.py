@@ -502,6 +502,51 @@ def main():
         output_folder / "pip_install_duration.png"
     )
     
+    # 11. Git Clone Performance
+    git_clone_data = {}
+    for data in json_data_list:
+        test_name = data.get('name', 'Unknown')
+        aggregated_stats = data.get('aggregated_statistics', {})
+        git_data = aggregated_stats.get('git_clone', {})
+        
+        if git_data:
+            num_files = git_data.get('files_created', {}).get('mean', 0)
+            speed_data = git_data.get('speed_bytes_per_sec', {})
+            values = speed_data.get('values', [])
+            
+            if values:
+                # Convert bytes/sec to MB/sec
+                git_clone_data[test_name] = {int(num_files): [v / (1024 * 1024) for v in values]}
+    
+    create_simple_box_plot(
+        git_clone_data,
+        "Git Clone Performance",
+        "Speed (MB/s)",
+        output_folder / "git_clone_performance.png"
+    )
+    
+    # 12. Git Clone Duration
+    git_clone_duration_data = {}
+    for data in json_data_list:
+        test_name = data.get('name', 'Unknown')
+        aggregated_stats = data.get('aggregated_statistics', {})
+        git_data = aggregated_stats.get('git_clone', {})
+        
+        if git_data:
+            num_files = git_data.get('files_created', {}).get('mean', 0)
+            duration_data = git_data.get('duration_sec', {})
+            values = duration_data.get('values', [])
+            
+            if values:
+                git_clone_duration_data[test_name] = {int(num_files): values}
+    
+    create_simple_box_plot(
+        git_clone_duration_data,
+        "Git Clone Duration",
+        "Duration (seconds)",
+        output_folder / "git_clone_duration.png"
+    )
+    
     print("\n✓ All plots generated successfully!")
     print(f"  Output folder: {output_folder.absolute()}\n")
 
