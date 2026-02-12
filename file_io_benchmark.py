@@ -457,7 +457,19 @@ class FileIOBenchmark:
 
         start_time = time.time()
         # Use longer timeout for pip install (30 minutes for slow file systems)
-        success, output, _ = self._run_command(cmd, timeout=1800)
+
+        try:
+            success, output, duration = self._run_command(
+                cmd, timeout=1800
+            )
+        except subprocess.CalledProcessError as e:
+            error_output = e.stdout + e.stderr if e.stdout and e.stderr else (e.stdout or e.stderr or "")
+            raise RuntimeError(
+                f"pip install failed with exit code {e.returncode}\n"
+                f"Command: {' '.join(e.cmd)}\n"
+                f"Output:\n{error_output}"
+            ) from e
+        
         elapsed = time.time() - start_time
 
         # Count installed files
