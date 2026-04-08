@@ -2,6 +2,8 @@
 
 A Python script to test file system I/O performance with various file sizes and operations, including real-world package manager workloads.
 
+For cross-OS WSL performance testing (WSL ext4 vs Windows NTFS), see the [exact instructions documented here](WSL_CROSS_OS_TESTING.md).
+
 ## Quick Start
 
 ### Docker
