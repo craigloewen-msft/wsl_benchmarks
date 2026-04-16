@@ -7,3 +7,4 @@ benchmark_temp
 out
 *-disk-space-*.json
 *-network-speed-*.json
+*-ram-overhead-*.json
