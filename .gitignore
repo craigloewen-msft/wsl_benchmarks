@@ -8,3 +8,4 @@ out
 *-disk-space-*.json
 *-network-speed-*.json
 *-ram-overhead-*.json
+*-cpu-stress-*.json
