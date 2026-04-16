@@ -6,3 +6,4 @@ benchmark_cache
 benchmark_temp
 out
 *-disk-space-*.json
+*-network-speed-*.json
