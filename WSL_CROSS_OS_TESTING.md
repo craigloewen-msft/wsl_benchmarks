@@ -85,6 +85,15 @@ python3 generate_plots.py benchmark_results_wsl-ext4.json /mnt/c/Users/<your-use
 | `pip` | Offline `pip install` into a venv |
 | `git` | Offline `git clone` from a local bare repo |
 
+### Quick run (fewer iterations)
+
+For a faster sanity check, reduce the iteration count:
+
+```bash
+python3 file_io_benchmark.py wsl-ext4 --runs 1
+python3 file_io_benchmark.py wsl-ntfs --working-folder /mnt/c/Users/<your-username>/some-test-dir --runs 1
+```
+
 ### Skip package manager tests
 
 If you only want raw I/O numbers (no npm/pip/git), skip setup entirely and run:
@@ -93,3 +102,14 @@ If you only want raw I/O numbers (no npm/pip/git), skip setup entirely and run:
 python3 file_io_benchmark.py wsl-ext4 --tests seq_write seq_read rand_write rand_read metadata
 python3 file_io_benchmark.py wsl-ntfs --working-folder /mnt/c/Users/<your-username>/some-test-dir --tests seq_write seq_read rand_write rand_read metadata
 ```
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `setup_caches.py` fails with network errors | You need internet for the first run only. Check proxy/VPN settings. |
+| npm/pip/git test says "cache not found" | Run `python3 setup_caches.py` first. The cache lives next to the script, not in the working folder. |
+| Permission errors on `/mnt/c/...` | Make sure the target directory is writable. Try a path under your Windows user profile. |
+| Very slow NTFS results | Expected — this is what the benchmark measures. 9P overhead on `/mnt/c` is significant for metadata-heavy workloads. |
