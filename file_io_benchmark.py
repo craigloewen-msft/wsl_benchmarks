@@ -35,7 +35,7 @@ class FileIOBenchmark:
         self.name = name
         self.results = {}
         self.all_runs = []  # Store results from all runs
-        self.cache_dir = self.working_dir / "benchmark_cache"  # Directory for offline caches
+        self.cache_dir = self.script_dir / "benchmark_cache"  # Directory for offline caches (always next to the script)
         
         # Ensure working directory exists
         self.working_dir.mkdir(parents=True, exist_ok=True)
