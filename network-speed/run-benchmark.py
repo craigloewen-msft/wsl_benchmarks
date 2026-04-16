@@ -10,47 +10,32 @@ Modes:
   default:  Uses Docker (or platform-equivalent) containers.
   --wsl:    Uses the default WSL distro instead of a container.
             Requires iperf3 installed in the WSL distro.
-
-Uses the appropriate container binary per platform:
-  - Windows: docker
-  - Mac:     container
-  - Linux:   docker
 """
 
 import argparse
 import json
-import platform
 import shutil
 import socket
 import subprocess
 import sys
 import time
-from datetime import date
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bench_helpers import (
+    add_common_args, build_container_run_cmd, get_container_bin,
+    get_platform_name, print_success, run, today_iso,
+)
 
 IMAGE_TAG = "network-speed-bench:latest"
 CONTAINER_NAME = "network-speed-bench-run"
 IPERF3_PORT = 5201
 TEST_DURATION = 10  # seconds per direction
 
-PLATFORM_CONFIG = {
-    "Windows": {"bin": "docker", "name": "windows"},
-    "Darwin": {"bin": "container", "name": "mac"},
-    "Linux": {"bin": "docker", "name": "linux"},
-}
-
 
 # ---------------------------------------------------------------------------
-# Shared helpers
+# iperf3 helpers
 # ---------------------------------------------------------------------------
-
-def run(cmd, check=True, quiet=False):
-    """Run a command, streaming output to the console."""
-    if not quiet:
-        print(f"  $ {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=check, capture_output=quiet)
-    return result.returncode
-
 
 def wait_for_iperf3(host, port=IPERF3_PORT, timeout=30):
     """Wait until the iperf3 server is accepting connections."""
@@ -67,12 +52,7 @@ def wait_for_iperf3(host, port=IPERF3_PORT, timeout=30):
 
 
 def run_iperf3_client(host, direction="upload", duration=TEST_DURATION):
-    """
-    Run iperf3 client on the host and return parsed JSON results.
-
-    direction: "upload"   = client sends to server (host -> target)
-               "download" = server sends to client (target -> host, -R flag)
-    """
+    """Run iperf3 client on the host and return parsed JSON results."""
     cmd = [
         "iperf3", "-c", host,
         "-p", str(IPERF3_PORT),
@@ -92,31 +72,11 @@ def bits_to_MBps(bits_per_second):
     return round(bits_per_second / 8 / 1_000_000, 2)
 
 
-def print_success(output_file, results):
-    print()
-    print("=" * 50)
-    print("  Benchmark completed successfully!")
-    print(f"  Results written to {output_file}")
-    print("=" * 50)
-    print(json.dumps(results, indent=2))
-
-
 # ---------------------------------------------------------------------------
 # Docker (container) mode
 # ---------------------------------------------------------------------------
 
-def get_container_bin():
-    system = platform.system()
-    config = PLATFORM_CONFIG.get(system)
-    if not config:
-        sys.exit(f"Unsupported platform: {system}")
-    bin_name = config["bin"]
-    if not shutil.which(bin_name):
-        sys.exit(f"Container binary '{bin_name}' not found in PATH")
-    return bin_name
-
-
-def run_docker_benchmark(plat, today, script_dir):
+def run_docker_benchmark(plat, today, script_dir, args):
     bin_name = get_container_bin()
     output_file = script_dir / f"{plat}-network-speed-{today}.json"
 
@@ -132,8 +92,12 @@ def run_docker_benchmark(plat, today, script_dir):
         print()
 
         print("=== Step 2: Starting iperf3 server in container ===")
-        run([bin_name, "run", "-d", "--name", CONTAINER_NAME,
-             "-p", f"{IPERF3_PORT}:{IPERF3_PORT}", IMAGE_TAG])
+        cmd = build_container_run_cmd(
+            bin_name, CONTAINER_NAME, IMAGE_TAG, [],
+            cpu=args.cpu, memory=args.memory,
+            extra_flags=["-d", "-p", f"{IPERF3_PORT}:{IPERF3_PORT}"],
+        )
+        run(cmd)
         wait_for_iperf3("127.0.0.1")
         print()
 
@@ -149,18 +113,22 @@ def run_docker_benchmark(plat, today, script_dir):
 
         print("=== Step 5: Cleaning up ===")
         run([bin_name, "rm", "-f", CONTAINER_NAME])
-        run([bin_name, "rmi", IMAGE_TAG], check=False)
+        run([bin_name, "rmi", IMAGE_TAG], check=False, quiet=True)
         print()
 
         results = {
             "platform": plat,
             "date": today,
             "container_tool": bin_name,
-            "network_speed_MBps": {
+            "network_speed": {
                 "upload_to_container": bits_to_MBps(upload_bps),
                 "download_from_container": bits_to_MBps(download_bps),
+                "units": "MBps",
             },
-            "test_duration_seconds": TEST_DURATION,
+            "test_duration": {
+                "value": TEST_DURATION,
+                "units": "seconds",
+            },
         }
 
         output_file.write_text(json.dumps(results, indent=2) + "\n")
@@ -181,7 +149,6 @@ def get_wsl_ip():
         ["wsl", "--", "ip", "-4", "-o", "addr", "show", "eth0"],
         check=True, capture_output=True, text=True,
     )
-    # Output like: "2: eth0  inet 172.28.169.147/20 ..."
     for token in result.stdout.split():
         if "/" in token and token[0].isdigit():
             return token.split("/")[0]
@@ -194,7 +161,6 @@ def run_wsl_benchmark(plat, today, script_dir):
     if not shutil.which("wsl"):
         sys.exit("wsl is not available on this system")
 
-    # Verify iperf3 is installed in WSL
     rc = subprocess.run(
         ["wsl", "--", "which", "iperf3"],
         capture_output=True,
@@ -245,11 +211,15 @@ def run_wsl_benchmark(plat, today, script_dir):
             "date": today,
             "container_tool": "wsl",
             "wsl_ip": wsl_ip,
-            "network_speed_MBps": {
+            "network_speed": {
                 "upload_to_wsl": bits_to_MBps(upload_bps),
                 "download_from_wsl": bits_to_MBps(download_bps),
+                "units": "MBps",
             },
-            "test_duration_seconds": TEST_DURATION,
+            "test_duration": {
+                "value": TEST_DURATION,
+                "units": "seconds",
+            },
         }
 
         output_file.write_text(json.dumps(results, indent=2) + "\n")
@@ -274,10 +244,11 @@ def main():
     parser.add_argument(
         "--wsl", action="store_true",
         help="Benchmark against the default WSL distro instead of a container")
+    add_common_args(parser)
     args = parser.parse_args()
 
-    plat = PLATFORM_CONFIG.get(platform.system(), {}).get("name", "unknown")
-    today = date.today().isoformat()
+    plat = get_platform_name()
+    today = today_iso()
     script_dir = Path(__file__).resolve().parent
 
     if not shutil.which("iperf3"):
@@ -286,7 +257,7 @@ def main():
     if args.wsl:
         run_wsl_benchmark(plat, today, script_dir)
     else:
-        run_docker_benchmark(plat, today, script_dir)
+        run_docker_benchmark(plat, today, script_dir, args)
 
 
 if __name__ == "__main__":

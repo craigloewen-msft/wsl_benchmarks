@@ -1,30 +1,37 @@
 #!/usr/bin/env python3
 """
-RAM overhead benchmark for wslc containers.
+RAM overhead benchmark for containers.
 
-Measures the host-side RAM cost of running an idle Alpine container by
-tracking the WorkingSet64 of the ``vmmemwslc-cli-{username}`` process.
+Measures the host-side RAM cost of running an idle Alpine container.
+
+Platform strategies:
+  - Windows: tracks WorkingSet64 of the ``vmmemwslc-cli-{user}`` process.
+  - macOS:   tracks RSS of ``com.apple.Virtualization.VirtualMachine``.
+  - Linux:   tracks cgroup memory usage for the container.
 
 Steps:
-  1. Ensure no existing wslc sessions (clean baseline).
+  1. Record baseline VM RAM (or 0 if the VM process isn't running).
   2. Build a minimal Alpine image.
-  3. Run the container (sleep 10s) and measure vmmem RAM.
+  3. Run the container (sleep) and measure VM RAM.
   4. Clean up and confirm RAM is released.
-
-Uses the appropriate container binary per platform:
-  - Windows: wslc
 """
 
+import argparse
 import json
 import os
 import platform
-import shutil
+import re
 import statistics
 import subprocess
 import sys
 import time
-from datetime import date
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bench_helpers import (
+    add_common_args, build_container_run_cmd, bytes_to_mb, get_container_bin,
+    get_platform_name, print_success, run, run_capture, today_iso,
+)
 
 IMAGE_TAG = "ram-overhead-bench:latest"
 CONTAINER_NAME = "ram-overhead-bench-run"
@@ -39,97 +46,171 @@ PLATFORM_CONFIG = {
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# RAM measurement — platform-dispatched
 # ---------------------------------------------------------------------------
 
-def run(cmd, check=True, quiet=False):
-    """Run a command, streaming output to the console."""
-    if not quiet:
-        print(f"  $ {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=check, capture_output=quiet)
-    return result.returncode
+def _sample_rss_bytes(samples=SAMPLES_PER_MEASUREMENT):
+    """Take *samples* RSS readings of the VM process and return the median.
 
-
-def run_capture(cmd):
-    """Run a command and return its stdout."""
-    return subprocess.run(
-        cmd, check=True, capture_output=True, text=True,
-    ).stdout
-
-
-def get_container_bin():
+    Dispatches to the correct platform helper.  Returns 0 when no VM
+    process is found.
+    """
     system = platform.system()
-    config = PLATFORM_CONFIG.get(system)
-    if not config:
-        sys.exit(f"Unsupported platform: {system}")
-    bin_name = config["bin"]
-    if not shutil.which(bin_name):
-        sys.exit(f"Container binary '{bin_name}' not found in PATH")
-    return bin_name
+    if system == "Windows":
+        return _sample_windows(samples)
+    elif system == "Darwin":
+        return _sample_darwin(samples)
+    else:
+        return _sample_linux(samples)
 
 
-def get_platform_name():
-    return PLATFORM_CONFIG[platform.system()]["name"]
+# -- macOS -----------------------------------------------------------------
+
+VM_PROC_NAME_MAC = "com.apple.Virtualization.VirtualMachine"
 
 
-def bytes_to_mb(b):
-    return round(b / (1024 * 1024), 2)
+def _find_vm_pid_mac():
+    """Return PID of the Virtualization.framework VM process, or None."""
+    try:
+        out = run_capture(["pgrep", "-f", VM_PROC_NAME_MAC])
+        pids = out.strip().splitlines()
+        return int(pids[0]) if pids else None
+    except (subprocess.CalledProcessError, ValueError):
+        return None
 
 
-# ---------------------------------------------------------------------------
-# RAM measurement (Windows-specific via vmmem process)
-# ---------------------------------------------------------------------------
+def _rss_for_pid_mac(pid):
+    """Return RSS in bytes for a given PID on macOS."""
+    out = run_capture(["ps", "-o", "rss=", "-p", str(pid)])
+    return int(out.strip()) * 1024  # ps reports RSS in KB
+
+
+def _sample_darwin(samples):
+    readings = []
+    for _ in range(samples):
+        pid = _find_vm_pid_mac()
+        if pid:
+            readings.append(_rss_for_pid_mac(pid))
+        else:
+            readings.append(0)
+        if len(readings) < samples:
+            time.sleep(1)
+    median = int(statistics.median(readings))
+    print(f"  VM RSS: {bytes_to_mb(median)} MB "
+          f"(samples: {[bytes_to_mb(s) for s in readings]})")
+    return median
+
+
+def _get_host_total_ram_mac():
+    out = run_capture(["sysctl", "-n", "hw.memsize"])
+    return round(int(out.strip()) / (1024 * 1024), 2)
+
+
+# -- Windows ---------------------------------------------------------------
 
 def _get_vmmem_process_name():
-    """Return the expected vmmem process name for the current user."""
     username = os.getlogin()
     return f"vmmemwslc-cli-{username}"
 
 
-def get_vmmem_working_set():
-    """
-    Return the WorkingSet64 (bytes) of the wslc vmmem process, or 0 if
-    the process does not exist.
-
-    Takes ``SAMPLES_PER_MEASUREMENT`` readings one second apart and returns
-    the median to smooth transient noise.
-    """
+def _sample_windows(samples):
     proc_name = _get_vmmem_process_name()
-    samples = []
-    for _ in range(SAMPLES_PER_MEASUREMENT):
+    readings = []
+    for _ in range(samples):
         try:
             ps_cmd = (
                 f"(Get-Process -Name '{proc_name}' "
                 f"-ErrorAction Stop).WorkingSet64"
             )
             out = run_capture(["powershell", "-NoProfile", "-Command", ps_cmd])
-            samples.append(int(out.strip()))
+            readings.append(int(out.strip()))
         except (subprocess.CalledProcessError, ValueError):
-            samples.append(0)
-        if len(samples) < SAMPLES_PER_MEASUREMENT:
+            readings.append(0)
+        if len(readings) < samples:
             time.sleep(1)
-
-    median = int(statistics.median(samples))
+    median = int(statistics.median(readings))
     print(f"  vmmem WorkingSet64: {bytes_to_mb(median)} MB "
-          f"(samples: {[bytes_to_mb(s) for s in samples]})")
+          f"(samples: {[bytes_to_mb(s) for s in readings]})")
     return median
 
 
-def get_host_total_ram_mb():
-    """Return total physical RAM on the host in MB."""
+def _get_host_total_ram_windows():
     ps_cmd = "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize"
     out = run_capture(["powershell", "-NoProfile", "-Command", ps_cmd])
     return round(int(out.strip()) / 1024, 2)
 
 
+# -- Linux -----------------------------------------------------------------
+
+def _sample_linux(samples):
+    """On Linux, read container cgroup memory or fall back to /proc/meminfo."""
+    readings = []
+    for _ in range(samples):
+        try:
+            out = run_capture(["docker", "stats", "--no-stream",
+                               "--format", "{{.MemUsage}}", CONTAINER_NAME])
+            # Output like "123.4MiB / 7.77GiB"
+            mem_str = out.strip().split("/")[0].strip()
+            match = re.match(r"([\d.]+)\s*(GiB|MiB|KiB|B)", mem_str)
+            if match:
+                val = float(match.group(1))
+                unit = match.group(2)
+                multiplier = {"B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
+                readings.append(int(val * multiplier.get(unit, 1)))
+            else:
+                readings.append(0)
+        except (subprocess.CalledProcessError, ValueError):
+            readings.append(0)
+        if len(readings) < samples:
+            time.sleep(1)
+    median = int(statistics.median(readings))
+    print(f"  Container mem: {bytes_to_mb(median)} MB "
+          f"(samples: {[bytes_to_mb(s) for s in readings]})")
+    return median
+
+
+def _get_host_total_ram_linux():
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemTotal:"):
+                return round(int(line.split()[1]) / 1024, 2)
+    return 0
+
+
 # ---------------------------------------------------------------------------
-# Session management
+# Helpers
+# ---------------------------------------------------------------------------
+
+def get_host_total_ram_mb():
+    system = platform.system()
+    if system == "Windows":
+        return _get_host_total_ram_windows()
+    elif system == "Darwin":
+        return _get_host_total_ram_mac()
+    else:
+        return _get_host_total_ram_linux()
+
+
+def get_vm_process_label():
+    system = platform.system()
+    if system == "Windows":
+        return _get_vmmem_process_name()
+    elif system == "Darwin":
+        return VM_PROC_NAME_MAC
+    else:
+        return "docker-stats"
+
+
+# ---------------------------------------------------------------------------
+# Session management (Windows/wslc only)
 # ---------------------------------------------------------------------------
 
 def terminate_all_sessions(bin_name):
-    """Terminate all wslc sessions so we start from a clean slate."""
+    """Terminate all wslc sessions (Windows only)."""
+    if platform.system() != "Windows":
+        return
     out = run_capture([bin_name, "session", "list"])
-    for line in out.strip().splitlines()[1:]:   # skip header
+    for line in out.strip().splitlines()[1:]:
         parts = line.split()
         if parts:
             session_id = parts[0]
@@ -138,8 +219,10 @@ def terminate_all_sessions(bin_name):
                 check=False, quiet=True)
 
 
-def wait_for_vmmem_gone(timeout=30):
-    """Wait until the vmmem process disappears."""
+def wait_for_vm_gone(timeout=30):
+    """Wait until the VM process disappears (Windows only)."""
+    if platform.system() != "Windows":
+        return
     proc_name = _get_vmmem_process_name()
     print(f"  Waiting for {proc_name} to exit ...")
     deadline = time.time() + timeout
@@ -159,70 +242,86 @@ def wait_for_vmmem_gone(timeout=30):
 # ---------------------------------------------------------------------------
 
 def main():
-    bin_name = get_container_bin()
-    plat = get_platform_name()
-    today = date.today().isoformat()
+    parser = argparse.ArgumentParser(
+        description="RAM overhead benchmark (idle container VM memory)")
+    add_common_args(parser)
+    args = parser.parse_args()
+
+    bin_name = get_container_bin(PLATFORM_CONFIG)
+    plat = get_platform_name(PLATFORM_CONFIG)
+    today = today_iso()
     script_dir = Path(__file__).resolve().parent
     output_file = script_dir / f"{plat}-ram-overhead-{today}.json"
-    vmmem_name = _get_vmmem_process_name()
+    vm_label = get_vm_process_label()
 
     host_total_mb = get_host_total_ram_mb()
     print(f"Platform: {plat} | Binary: {bin_name}")
     print(f"Host RAM: {host_total_mb} MB")
-    print(f"vmmem process: {vmmem_name}")
+    print(f"VM process: {vm_label}")
     print()
 
     try:
-        # --- Step 1: Clean slate ----------------------------------------
-        print("=== Step 1: Ensuring clean slate (no active sessions) ===")
+        print("=== Step 1: Measuring baseline VM RAM ===")
         run([bin_name, "rm", "-f", CONTAINER_NAME], check=False, quiet=True)
         terminate_all_sessions(bin_name)
-        wait_for_vmmem_gone()
-        print()
+        wait_for_vm_gone()
+        baseline_bytes = _sample_rss_bytes()
+        baseline_mb = bytes_to_mb(baseline_bytes)
+        print(f"  → Baseline VM RAM: {baseline_mb} MB\n")
 
-        # --- Step 2: Build image ----------------------------------------
         print("=== Step 2: Building container image ===")
         run([bin_name, "build", "-t", IMAGE_TAG, str(script_dir)])
-        # Building may start a session; terminate it to reset baseline.
         terminate_all_sessions(bin_name)
-        wait_for_vmmem_gone()
+        wait_for_vm_gone()
         print()
 
-        # --- Step 3: Run container and measure --------------------------
         print("=== Step 3: Running idle container ===")
-        run([bin_name, "run", "-d", "--name", CONTAINER_NAME,
-             IMAGE_TAG, "sleep", "10"])
+        cmd = build_container_run_cmd(
+            bin_name, CONTAINER_NAME, IMAGE_TAG,
+            ["sleep", "120"],
+            cpu=args.cpu, memory=args.memory, extra_flags=["-d"],
+        )
+        run(cmd)
         print(f"  Waiting {STABILIZATION_DELAY}s for VM to stabilize ...")
         time.sleep(STABILIZATION_DELAY)
 
-        container_ws = get_vmmem_working_set()
-        container_mb = bytes_to_mb(container_ws)
-        print(f"  → Container RAM overhead: {container_mb} MB\n")
+        container_bytes = _sample_rss_bytes()
+        container_mb = bytes_to_mb(container_bytes)
+        overhead_mb = bytes_to_mb(container_bytes - baseline_bytes)
+        print(f"  → VM RAM with container: {container_mb} MB")
+        print(f"  → Overhead vs baseline: {overhead_mb} MB\n")
 
-        # --- Step 4: Cleanup --------------------------------------------
         print("=== Step 4: Cleaning up ===")
         run([bin_name, "rm", "-f", CONTAINER_NAME])
-        run([bin_name, "rmi", IMAGE_TAG], check=False)
+        run([bin_name, "rmi", IMAGE_TAG], check=False, quiet=True)
         terminate_all_sessions(bin_name)
         print(f"  Waiting {STABILIZATION_DELAY}s for cleanup ...")
         time.sleep(STABILIZATION_DELAY)
 
-        post_cleanup_ws = get_vmmem_working_set()
-        post_cleanup_mb = bytes_to_mb(post_cleanup_ws)
-        print(f"  → Post-cleanup vmmem: {post_cleanup_mb} MB\n")
+        post_cleanup_bytes = _sample_rss_bytes()
+        post_cleanup_mb = bytes_to_mb(post_cleanup_bytes)
+        print(f"  → Post-cleanup VM RAM: {post_cleanup_mb} MB\n")
 
-        # --- Results ----------------------------------------------------
         results = {
             "platform": plat,
             "date": today,
             "container_tool": bin_name,
-            "host_total_ram_mb": host_total_mb,
-            "vmmem_process": vmmem_name,
-            "ram_overhead_mb": {
-                "idle_container_mb": container_mb,
-                "post_cleanup_mb": post_cleanup_mb,
+            "host_total_ram": {
+                "value": host_total_mb,
+                "units": "MB",
             },
-            "stabilization_delay_seconds": STABILIZATION_DELAY,
+            "vm_process": vm_label,
+            "ram_overhead": {
+                "baseline": baseline_mb,
+                "with_idle_container": container_mb,
+                "overhead": overhead_mb,
+                "post_cleanup": post_cleanup_mb,
+                "units": "MB",
+            },
+            "stabilization_delay": {
+                "value": STABILIZATION_DELAY,
+                "units": "seconds",
+            },
             "samples_per_measurement": SAMPLES_PER_MEASUREMENT,
         }
 
@@ -231,15 +330,6 @@ def main():
 
     finally:
         run([bin_name, "rm", "-f", CONTAINER_NAME], check=False, quiet=True)
-
-
-def print_success(output_file, results):
-    print()
-    print("=" * 50)
-    print("  Benchmark completed successfully!")
-    print(f"  Results written to {output_file}")
-    print("=" * 50)
-    print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":

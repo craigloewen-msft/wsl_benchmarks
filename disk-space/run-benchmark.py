@@ -4,21 +4,20 @@ Disk space benchmark for container technology.
 
 Measures host disk space impact of building, running, and cleaning up
 a container that compiles the Linux kernel.
-
-Uses the appropriate container binary per platform:
-  - Windows: wslc
-  - Mac:     container
-  - Linux:   docker
 """
 
+import argparse
 import json
 import os
 import platform
-import shutil
-import subprocess
 import sys
-from datetime import date
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from bench_helpers import (
+    add_common_args, build_container_run_cmd, bytes_to_mb, get_container_bin,
+    get_platform_name, print_success, run, run_capture, today_iso,
+)
 
 IMAGE_TAG = "disk-space-bench:latest"
 CONTAINER_NAME = "disk-space-bench-run"
@@ -32,31 +31,28 @@ PLATFORM_CONFIG = {
 }
 
 
-def get_container_bin():
-    system = platform.system()
-    config = PLATFORM_CONFIG.get(system)
-    if not config:
-        sys.exit(f"Unsupported platform: {system}")
-    bin_name = config["bin"]
-    if not shutil.which(bin_name):
-        sys.exit(f"Container binary '{bin_name}' not found in PATH")
-    return bin_name
+def _get_directory_size(directory: Path) -> int:
+    """Get actual on-disk size of all files in a directory recursively.
+
+    Uses st_blocks to measure real disk usage (handles sparse files and
+    APFS clones correctly), matching what ``du`` reports.
+    """
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(directory):
+            for f in files:
+                try:
+                    st = os.stat(os.path.join(root, f))
+                    total += st.st_blocks * 512  # st_blocks is in 512-byte units
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
 
 
-def get_platform_name():
-    return PLATFORM_CONFIG[platform.system()]["name"]
-
-
-# TODO: Platform-specific disk space measurement.
-# The current placeholder uses basic OS-level disk usage queries.
-# This may NOT accurately reflect container storage changes because:
-#   - Mac: container data lives inside a VM disk image (e.g. Docker.raw).
-#     Consider measuring that file's size directly.
-#   - Linux: Docker stores data in /var/lib/docker by default.
-#     Consider using `du -sb /var/lib/docker` or `docker system df`.
-# In all cases, virtual disks may grow but not shrink automatically.
-# This function should return disk space used in bytes.
 def get_disk_space_used():
+    """Return bytes of disk consumed by container storage."""
     system = platform.system()
     if system == "Windows":
         username = os.getlogin()
@@ -65,29 +61,20 @@ def get_disk_space_used():
         if not vhdx.exists():
             sys.exit(f"VHDX not found: {vhdx}")
         return vhdx.stat().st_size
+    elif system == "Darwin":
+        container_dir = Path.home() / "Library" / "Application Support" / "com.apple.container"
+        if not container_dir.exists():
+            sys.exit(f"Container storage not found: {container_dir}")
+        return _get_directory_size(container_dir)
     else:
+        # Linux: measure /var/lib/docker
+        docker_dir = Path("/var/lib/docker")
+        if docker_dir.exists():
+            return _get_directory_size(docker_dir)
         result = run_capture(["df", "-k", "/"])
         line = result.strip().splitlines()[-1]
         used_kb = int(line.split()[2])
         return used_kb * 1024
-
-
-def bytes_to_mb(b):
-    return round(b / (1024 * 1024), 2)
-
-
-def run(cmd, check=True, quiet=False):
-    """Run a command, streaming output to the console."""
-    if not quiet:
-        print(f"  $ {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=check,
-                            capture_output=quiet)
-    return result.returncode
-
-
-def run_capture(cmd):
-    """Run a command and return its stdout."""
-    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
 
 
 def container_exec(bin_name, cmd_str):
@@ -96,9 +83,14 @@ def container_exec(bin_name, cmd_str):
 
 
 def main():
-    bin_name = get_container_bin()
-    plat = get_platform_name()
-    today = date.today().isoformat()
+    parser = argparse.ArgumentParser(
+        description="Disk space benchmark (Linux kernel compile in container)")
+    add_common_args(parser)
+    args = parser.parse_args()
+
+    bin_name = get_container_bin(PLATFORM_CONFIG)
+    plat = get_platform_name(PLATFORM_CONFIG)
+    today = today_iso()
     script_dir = Path(__file__).resolve().parent
     output_file = script_dir / f"{plat}-disk-space-{today}.json"
 
@@ -107,17 +99,19 @@ def main():
     print()
 
     try:
-        # Step 1: Build the container image
         print("=== Step 1: Building container image ===")
         run([bin_name, "build", "-t", IMAGE_TAG, str(script_dir)])
 
         disk_after_build = get_disk_space_used()
         print(f"Disk used after image build: {bytes_to_mb(disk_after_build)} MB\n")
 
-        # Step 2: Start container and compile the Linux kernel
         print("=== Step 2: Compiling Linux kernel ===")
-        run([bin_name, "run", "-d", "--name", CONTAINER_NAME, IMAGE_TAG,
-             "tail", "-f", "/dev/null"])
+        cmd = build_container_run_cmd(
+            bin_name, CONTAINER_NAME, IMAGE_TAG,
+            ["tail", "-f", "/dev/null"],
+            cpu=args.cpu, memory=args.memory, extra_flags=["-d"],
+        )
+        run(cmd)
 
         build_cmd = (
             f"cd /build"
@@ -132,14 +126,12 @@ def main():
         disk_after_compile = get_disk_space_used()
         print(f"Disk used after kernel compile: {bytes_to_mb(disk_after_compile)} MB\n")
 
-        # Step 3: Delete kernel build files inside the container
         print("=== Step 3: Cleaning kernel build files ===")
         container_exec(bin_name, "rm -rf /build/*")
 
         disk_after_cleanup = get_disk_space_used()
         print(f"Disk used after kernel cleanup: {bytes_to_mb(disk_after_cleanup)} MB\n")
 
-        # Step 4: Delete the container and image
         print("=== Step 4: Deleting container and image ===")
         run([bin_name, "rm", "-f", CONTAINER_NAME])
         run([bin_name, "rmi", IMAGE_TAG], check=False)
@@ -147,7 +139,6 @@ def main():
         disk_after_delete = get_disk_space_used()
         print(f"Disk used after container/image delete: {bytes_to_mb(disk_after_delete)} MB\n")
 
-        # Write results
         results = {
             "platform": plat,
             "date": today,
@@ -158,6 +149,13 @@ def main():
                 "after_kernel_compile": bytes_to_mb(disk_after_compile),
                 "after_kernel_cleanup": bytes_to_mb(disk_after_cleanup),
                 "after_container_delete": bytes_to_mb(disk_after_delete),
+                "units": "MB",
+            },
+            "disk_space_diff_mb": {
+                "kernel_compile_added": round(bytes_to_mb(disk_after_compile) - bytes_to_mb(disk_after_build), 2),
+                "kernel_cleanup_reclaimed": round(bytes_to_mb(disk_after_compile) - bytes_to_mb(disk_after_cleanup), 2),
+                "container_delete_diff": round(bytes_to_mb(disk_after_delete) - bytes_to_mb(disk_after_build), 2),
+                "units": "MB",
             },
         }
 
@@ -165,17 +163,7 @@ def main():
         print_success(output_file, results)
 
     finally:
-        # Always try to clean up the container on failure
         run([bin_name, "rm", "-f", CONTAINER_NAME], check=False, quiet=True)
-
-
-def print_success(output_file, results):
-    print()
-    print("=" * 50)
-    print("  Benchmark completed successfully!")
-    print(f"  Results written to {output_file}")
-    print("=" * 50)
-    print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":

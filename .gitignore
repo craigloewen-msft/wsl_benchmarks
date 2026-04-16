@@ -9,3 +9,5 @@ out
 *-network-speed-*.json
 *-ram-overhead-*.json
 *-cpu-stress-*.json
+*-file-perf-*.json
+benchmark_results_*.json
