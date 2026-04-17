@@ -32,6 +32,12 @@ CONTAINER_NAME = "network-speed-bench-run"
 IPERF3_PORT = 5201
 TEST_DURATION = 10  # seconds per direction
 
+PLATFORM_CONFIG = {
+    "Windows": {"bin": "wslc", "name": "windows"},
+    "Darwin":  {"bin": "container", "name": "mac"},
+    "Linux":   {"bin": "docker", "name": "linux"},
+}
+
 
 # ---------------------------------------------------------------------------
 # iperf3 helpers
@@ -77,7 +83,7 @@ def bits_to_MBps(bits_per_second):
 # ---------------------------------------------------------------------------
 
 def run_docker_benchmark(plat, today, script_dir, args):
-    bin_name = get_container_bin()
+    bin_name = get_container_bin(PLATFORM_CONFIG)
     output_file = script_dir / f"{plat}-network-speed-{today}.json"
 
     print(f"Platform: {plat} | Binary: {bin_name}")
@@ -247,7 +253,7 @@ def main():
     add_common_args(parser)
     args = parser.parse_args()
 
-    plat = get_platform_name()
+    plat = get_platform_name(PLATFORM_CONFIG)
     today = today_iso()
     script_dir = Path(__file__).resolve().parent
 

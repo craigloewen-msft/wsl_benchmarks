@@ -16,7 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bench_helpers import (
     add_common_args, build_container_run_cmd, bytes_to_mb, get_container_bin,
-    get_platform_name, print_success, run, run_capture, today_iso,
+    get_platform_name, print_success, run, run_capture,
+    stop_container_system, today_iso, wait_for_vm_exit,
 )
 
 IMAGE_TAG = "disk-space-bench:latest"
@@ -98,7 +99,26 @@ def main():
     print(f"Kernel:   Linux {KERNEL_VERSION}")
     print()
 
+    run([bin_name, "rm", "-f", CONTAINER_NAME], check=False, quiet=True)
+
     try:
+        print("=== Step 0: Resetting container storage ===")
+        if platform.system() == "Windows":
+            username = os.getlogin()
+            vhdx = Path(f"C:/Users/{username}/AppData/Local/wslc/sessions"
+                        f"/wslc-cli-{username}/storage.vhdx")
+            stop_container_system(bin_name)
+            wait_for_vm_exit(timeout=60)
+            if vhdx.exists():
+                print(f"  Deleting {vhdx} ...")
+                vhdx.unlink()
+                print(f"  Deleted.")
+            else:
+                print(f"  VHDX not found, skipping delete.")
+            print(f"  Recreating storage with image ls ...")
+            run([bin_name, "image", "ls"])
+        print()
+
         print("=== Step 1: Building container image ===")
         run([bin_name, "build", "-t", IMAGE_TAG, str(script_dir)])
 

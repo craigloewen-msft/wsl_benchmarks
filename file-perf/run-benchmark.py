@@ -25,6 +25,12 @@ IMAGE_TAG = "file-perf-bench:latest"
 CONTAINER_NAME = "file-perf-bench-run"
 CONTAINER_OUTPUT_DIR = "/out"
 
+PLATFORM_CONFIG = {
+    "Windows": {"bin": "wslc", "name": "windows"},
+    "Darwin":  {"bin": "container", "name": "mac"},
+    "Linux":   {"bin": "docker", "name": "linux"},
+}
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -47,8 +53,8 @@ def main():
     add_common_args(parser)
     args = parser.parse_args()
 
-    bin_name = get_container_bin()
-    plat = get_platform_name()
+    bin_name = get_container_bin(PLATFORM_CONFIG)
+    plat = get_platform_name(PLATFORM_CONFIG)
     today = today_iso()
     script_dir = Path(__file__).resolve().parent
     output_file = script_dir / f"{plat}-file-perf-{today}.json"

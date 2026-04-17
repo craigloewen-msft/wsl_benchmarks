@@ -30,7 +30,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bench_helpers import (
     add_common_args, build_container_run_cmd, bytes_to_mb, get_container_bin,
-    get_platform_name, print_success, run, run_capture, today_iso,
+    get_platform_name, get_vm_process_name, print_success, run, run_capture,
+    stop_container_system, today_iso, wait_for_vm_exit,
 )
 
 IMAGE_TAG = "ram-overhead-bench:latest"
@@ -66,13 +67,11 @@ def _sample_rss_bytes(samples=SAMPLES_PER_MEASUREMENT):
 
 # -- macOS -----------------------------------------------------------------
 
-VM_PROC_NAME_MAC = "com.apple.Virtualization.VirtualMachine"
-
 
 def _find_vm_pid_mac():
     """Return PID of the Virtualization.framework VM process, or None."""
     try:
-        out = run_capture(["pgrep", "-f", VM_PROC_NAME_MAC])
+        out = run_capture(["pgrep", "-f", get_vm_process_name()])
         pids = out.strip().splitlines()
         return int(pids[0]) if pids else None
     except (subprocess.CalledProcessError, ValueError):
@@ -108,13 +107,9 @@ def _get_host_total_ram_mac():
 
 # -- Windows ---------------------------------------------------------------
 
-def _get_vmmem_process_name():
-    username = os.getlogin()
-    return f"vmmemwslc-cli-{username}"
-
 
 def _sample_windows(samples):
-    proc_name = _get_vmmem_process_name()
+    proc_name = get_vm_process_name()
     readings = []
     for _ in range(samples):
         try:
@@ -192,49 +187,7 @@ def get_host_total_ram_mb():
 
 
 def get_vm_process_label():
-    system = platform.system()
-    if system == "Windows":
-        return _get_vmmem_process_name()
-    elif system == "Darwin":
-        return VM_PROC_NAME_MAC
-    else:
-        return "docker-stats"
-
-
-# ---------------------------------------------------------------------------
-# Session management (Windows/wslc only)
-# ---------------------------------------------------------------------------
-
-def terminate_all_sessions(bin_name):
-    """Terminate all wslc sessions (Windows only)."""
-    if platform.system() != "Windows":
-        return
-    out = run_capture([bin_name, "session", "list"])
-    for line in out.strip().splitlines()[1:]:
-        parts = line.split()
-        if parts:
-            session_id = parts[0]
-            print(f"  Terminating session {session_id}")
-            run([bin_name, "session", "terminate", session_id],
-                check=False, quiet=True)
-
-
-def wait_for_vm_gone(timeout=30):
-    """Wait until the VM process disappears (Windows only)."""
-    if platform.system() != "Windows":
-        return
-    proc_name = _get_vmmem_process_name()
-    print(f"  Waiting for {proc_name} to exit ...")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            run_capture(["powershell", "-NoProfile", "-Command",
-                         f"Get-Process -Name '{proc_name}' -ErrorAction Stop"])
-            time.sleep(2)
-        except subprocess.CalledProcessError:
-            print(f"  {proc_name} is gone.")
-            return
-    print(f"  Warning: {proc_name} still present after {timeout}s")
+    return get_vm_process_name() or "docker-stats"
 
 
 # ---------------------------------------------------------------------------
@@ -263,16 +216,16 @@ def main():
     try:
         print("=== Step 1: Measuring baseline VM RAM ===")
         run([bin_name, "rm", "-f", CONTAINER_NAME], check=False, quiet=True)
-        terminate_all_sessions(bin_name)
-        wait_for_vm_gone()
+        stop_container_system(bin_name)
+        wait_for_vm_exit()
         baseline_bytes = _sample_rss_bytes()
         baseline_mb = bytes_to_mb(baseline_bytes)
         print(f"  → Baseline VM RAM: {baseline_mb} MB\n")
 
         print("=== Step 2: Building container image ===")
         run([bin_name, "build", "-t", IMAGE_TAG, str(script_dir)])
-        terminate_all_sessions(bin_name)
-        wait_for_vm_gone()
+        stop_container_system(bin_name)
+        wait_for_vm_exit()
         print()
 
         print("=== Step 3: Running idle container ===")
@@ -294,7 +247,7 @@ def main():
         print("=== Step 4: Cleaning up ===")
         run([bin_name, "rm", "-f", CONTAINER_NAME])
         run([bin_name, "rmi", IMAGE_TAG], check=False, quiet=True)
-        terminate_all_sessions(bin_name)
+        stop_container_system(bin_name)
         print(f"  Waiting {STABILIZATION_DELAY}s for cleanup ...")
         time.sleep(STABILIZATION_DELAY)
 

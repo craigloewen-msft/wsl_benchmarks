@@ -9,10 +9,12 @@ each benchmark's ``run-benchmark.py`` does not duplicate boilerplate.
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from datetime import date
 
@@ -62,14 +64,85 @@ def run(cmd, check=True, quiet=False):
     if not quiet:
         print(f"  $ {' '.join(cmd)}")
     result = subprocess.run(cmd, check=check, capture_output=quiet)
+    # Print output and do a null check
+    print(f" -> {result.stdout.decode().strip() if result.stdout else ''}")
     return result.returncode
 
 
 def run_capture(cmd):
     """Run *cmd* and return its stdout as a string."""
-    return subprocess.run(
+    print(f"  $ {' '.join(cmd)}")
+
+    resultString = subprocess.run(
         cmd, check=True, capture_output=True, text=True,
     ).stdout
+
+    print(f"  → {resultString.strip()}")
+
+    return resultString
+
+
+
+# ---------------------------------------------------------------------------
+# Session / VM management
+# ---------------------------------------------------------------------------
+
+VM_PROCESS_NAME_MAC = "com.apple.Virtualization.VirtualMachine"
+
+
+def get_vm_process_name():
+    """Return the name of the backing VM process for the current platform.
+
+    Returns ``None`` on Linux where there is no separate VM process.
+    """
+    system = platform.system()
+    if system == "Windows":
+        username = os.getlogin()
+        return f"vmmemwslc-cli-{username}"
+    elif system == "Darwin":
+        return VM_PROCESS_NAME_MAC
+    return None
+
+
+def stop_container_system(bin_name):
+    """Stop the container VM / terminate all sessions for a cold start.
+
+    Windows:  enumerates ``wslc session list`` and terminates each session.
+    macOS:    runs ``container system stop``.
+    Linux:    no-op (Docker has no separate VM).
+    """
+    system = platform.system()
+    if system == "Windows":
+        run([bin_name, "session", "terminate"], check=False)
+    elif system == "Darwin":
+        run([bin_name, "system", "stop"], check=False)
+
+
+def wait_for_vm_exit(timeout=30):
+    """Block until the backing VM process has exited.
+
+    Returns silently on Linux where there is no separate VM process.
+    """
+    proc_name = get_vm_process_name()
+    if proc_name is None:
+        return
+
+    system = platform.system()
+    print(f"  Waiting for {proc_name} to exit ...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if system == "Windows":
+                run_capture(["powershell", "-NoProfile", "-Command",
+                             f"Get-Process -Name '{proc_name}' "
+                             f"-ErrorAction Stop"])
+            else:
+                run_capture(["pgrep", "-f", proc_name])
+            time.sleep(2)
+        except subprocess.CalledProcessError:
+            print(f"  {proc_name} is gone.")
+            return
+    print(f"  Warning: {proc_name} still present after {timeout}s")
 
 
 # ---------------------------------------------------------------------------

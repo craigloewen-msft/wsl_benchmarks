@@ -21,7 +21,13 @@ from bench_helpers import (
 
 IMAGE_TAG = "cpu-stress-bench:latest"
 CONTAINER_NAME = "cpu-stress-bench-run"
-TEST_RUNS = 3
+TEST_RUNS = 1
+
+PLATFORM_CONFIG = {
+    "Windows": {"bin": "wslc", "name": "windows"},
+    "Darwin":  {"bin": "container", "name": "mac"},
+    "Linux":   {"bin": "docker", "name": "linux"},
+}
 
 
 def parse_average(output):
@@ -41,8 +47,8 @@ def main():
     add_common_args(parser)
     args = parser.parse_args()
 
-    bin_name = get_container_bin()
-    plat = get_platform_name()
+    bin_name = get_container_bin(PLATFORM_CONFIG)
+    plat = get_platform_name(PLATFORM_CONFIG)
     today = today_iso()
     script_dir = Path(__file__).resolve().parent
     output_file = script_dir / f"{plat}-cpu-stress-{today}.json"

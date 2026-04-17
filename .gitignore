@@ -10,4 +10,5 @@ out
 *-ram-overhead-*.json
 *-cpu-stress-*.json
 *-file-perf-*.json
+*-startup-time-*.json
 benchmark_results_*.json

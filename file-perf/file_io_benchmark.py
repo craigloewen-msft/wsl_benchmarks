@@ -293,7 +293,7 @@ class FileIOBenchmark:
         }
     
     def _run_command(self, cmd: List[str], cwd: Optional[Path] = None,
-                     env: Optional[Dict] = None, timeout: int = 300,
+                     env: Optional[Dict] = None, timeout: int = 1200,
                      check: bool = True) -> Tuple[bool, str, float]:
         """Run a shell command and return success status, output, and duration
 
@@ -973,7 +973,7 @@ class FileIOBenchmark:
                 stats = self._calculate_statistics(metrics['git_clone']['speed_bytes_per_sec'])
                 print(f"  Speed: {self._format_speed(stats['mean'])} ± {self._format_speed(stats['std_dev'])}")
     
-    def run_multiple_benchmarks(self, num_runs: int = 5, selected_tests=None):
+    def run_multiple_benchmarks(self, num_runs: int = 2, selected_tests=None):
         """Run benchmark suite multiple times and aggregate results
 
         Args:
