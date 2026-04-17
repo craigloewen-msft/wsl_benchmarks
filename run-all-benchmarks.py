@@ -18,10 +18,10 @@ from pathlib import Path
 BENCHMARKS = [
     ("startup-time",  "Cold Start Timing"),
     ("cpu-test",      "CPU Stress (pts/smallpt)"),
-    ("disk-space",    "Disk Space (kernel compile)"),
-    ("file-perf",     "File I/O Performance"),
     ("network-speed", "Network Speed (iperf3)"),
     ("ram-overhead",  "RAM Overhead"),
+    ("disk-space",    "Disk Space (kernel compile)"),
+    ("file-perf",     "File I/O Performance"),
 ]
 
 # ── ANSI escape helpers ──────────────────────────────────────────────────

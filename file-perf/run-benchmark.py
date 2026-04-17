@@ -48,8 +48,8 @@ def main():
                         choices=["seq_write", "seq_read", "rand_write",
                                  "rand_read", "metadata", "npm", "pip", "git"],
                         help="Select specific tests to run (default: all)")
-    parser.add_argument("--runs", "-r", type=int, default=5,
-                        help="Number of benchmark iterations (default: 5)")
+    parser.add_argument("--runs", "-r", type=int, default=2,
+                        help="Number of benchmark iterations (default: 2)")
     add_common_args(parser)
     args = parser.parse_args()
 
@@ -91,7 +91,8 @@ def main():
         cmd = build_container_run_cmd(
             bin_name, CONTAINER_NAME, IMAGE_TAG, inner_cmd,
             cpu=args.cpu, memory=args.memory,
-            extra_flags=["-v", f"{host_output_dir}:{CONTAINER_OUTPUT_DIR}"],
+            extra_flags=["-e", "PYTHONUNBUFFERED=1",
+                         "-v", f"{host_output_dir}:{CONTAINER_OUTPUT_DIR}"],
         )
         print(f"  $ {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=False, text=True)
