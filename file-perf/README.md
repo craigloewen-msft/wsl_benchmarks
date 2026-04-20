@@ -8,7 +8,7 @@ A Python script to test file system I/O performance with various file sizes and 
 
 **With shared volume (tests run on mounted host directory):**
 ```bash
-docker build -t test-image . && docker run --rm -it -v $(pwd)/out:/out test-image python file_io_benchmark.py wsl-ext4 --working-folder /out
+docker build -t test-image . && docker run --rm -it -v "$(pwd)/out:/out" test-image python file_io_benchmark.py wsl-ext4 --working-folder /out
 ```
 
 **Without shared volume (tests run entirely in container, then copy results):**
